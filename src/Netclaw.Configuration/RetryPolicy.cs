@@ -3,6 +3,7 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.ClientModel;
 using System.Net;
 using System.Net.Sockets;
 
@@ -19,56 +20,85 @@ public sealed record RetryPolicy
 
     /// <summary>
     /// Determines whether the given exception is transient and should be retried.
-    /// Retries on: status-less network failures, 408/429/5xx responses (whether they
-    /// surface as a raw <see cref="HttpRequestException"/> or are curated into a
-    /// <see cref="ProviderException"/> by a provider transport layer), transport-level
-    /// stream truncation (<see cref="HttpIOException"/> with
+    /// The exception and its <see cref="Exception.InnerException"/> chain are
+    /// classified in this order:
+    /// <list type="number">
+    /// <item>An HTTP status carried by the outermost status-bearing exception
+    /// (<see cref="ProviderException"/>, the OpenAI SDK's
+    /// <see cref="ClientResultException"/>, or <see cref="HttpRequestException"/>) is
+    /// authoritative: 408/429/5xx retry, anything else does not, regardless of what
+    /// transport exception sits underneath.</item>
+    /// <item>Status-less <see cref="HttpRequestException"/>s (connection-level failures)
+    /// and timeout-style cancellations retry.</item>
+    /// <item>An <see cref="HttpIOException"/> (thrown while reading a response body, e.g.
+    /// a stream that "ended prematurely") retries only for
     /// <see cref="HttpRequestError.ResponseEnded"/> or
-    /// <see cref="HttpRequestError.ConnectionError"/>, or a socket failure surfacing as an
-    /// I/O error mid-read), and timeout-style cancellations. Other
-    /// <see cref="IOException"/>s are deliberately not treated as transient.
+    /// <see cref="HttpRequestError.ConnectionError"/>; other codes describe a malformed
+    /// or rejected exchange and never retry, even over a socket error.</item>
+    /// <item>Otherwise a <see cref="SocketException"/> anywhere in the chain (e.g. a
+    /// connection reset surfacing as a plain <see cref="IOException"/> mid-read) retries.</item>
+    /// </list>
+    /// Other <see cref="IOException"/>s are deliberately not treated as transient.
+    /// Only <see cref="Exception.InnerException"/> is followed: the members of an
+    /// <see cref="AggregateException"/> beyond its first inner exception are not inspected.
     /// </summary>
     public bool ShouldRetry(Exception ex, int attempt)
     {
         if (attempt >= MaxRetries)
             return false;
 
-        // Curated provider errors (e.g. the self-hosted OpenAI-compatible client) carry
-        // the HTTP status on a ProviderException rather than a raw HttpRequestException,
-        // and it may be nested under an inner exception. Without this, the retry layer
-        // would miss the provider 429/5xx it most needs to retry.
-        if (FindInner<ProviderException>(ex) is { StatusCode: 408 or 429 or (>= 500 and <= 599) })
+        // Curated provider errors (e.g. the self-hosted OpenAI-compatible client) and SDK
+        // errors (ClientResultException) carry the HTTP status on the wrapper rather than
+        // on a raw HttpRequestException, possibly nested under other exceptions. The
+        // outermost status wins so that, e.g., a 400 wrapping a dropped connection is not
+        // retried.
+        if (FindStatus(ex) is { } status)
+            return status.IsTransient;
+
+        if (FindInner<HttpRequestException>(ex) is { StatusCode: null })
             return true;
 
-        // A streaming response cut off by the network (e.g. "The response ended
-        // prematurely. (ResponseEnded)") surfaces as HttpIOException while reading the
-        // body, not as an HttpRequestException, and SDK clients (e.g. System.ClientModel's
-        // ClientResultException) may wrap it. InvalidResponse / UserAuthenticationError /
-        // other codes describe a malformed or rejected exchange, so they stay non-transient.
-        if (FindInner<HttpIOException>(ex) is
-            { HttpRequestError: HttpRequestError.ResponseEnded or HttpRequestError.ConnectionError })
+        if (ex is TaskCanceledException or TimeoutException)
             return true;
 
-        // A connection reset mid-body can surface as an IOException wrapping the
-        // SocketException rather than as an HttpIOException.
-        if (ex is IOException && FindInner<SocketException>(ex) is not null)
-            return true;
+        // A streaming response cut off by the network ("The response ended prematurely.
+        // (ResponseEnded)") surfaces as HttpIOException while reading the body. Its error
+        // code is authoritative for the SocketException check below.
+        if (FindInner<HttpIOException>(ex) is { } ioEx)
+            return ioEx.HttpRequestError is HttpRequestError.ResponseEnded or HttpRequestError.ConnectionError;
 
-        return ex switch
-        {
-            HttpRequestException { StatusCode: null } => true,
-            HttpRequestException httpEx => httpEx.StatusCode is
-                HttpStatusCode.RequestTimeout or
-                HttpStatusCode.TooManyRequests or
-                HttpStatusCode.InternalServerError or
-                HttpStatusCode.BadGateway or
-                HttpStatusCode.ServiceUnavailable or
-                HttpStatusCode.GatewayTimeout,
-            TaskCanceledException => true,
-            TimeoutException => true,
-            _ => false
-        };
+        return FindInner<SocketException>(ex) is not null;
     }
+
+    private readonly record struct HttpStatus(bool IsTransient);
+
+    private static HttpStatus? FindStatus(Exception? ex)
+    {
+        for (; ex is not null; ex = ex.InnerException)
+        {
+            switch (ex)
+            {
+                case ProviderException { StatusCode: { } providerStatus }:
+                    return new HttpStatus(IsTransientProviderStatus(providerStatus));
+                // Status 0 means the SDK never received a response (transport failure).
+                case ClientResultException { Status: > 0 } clientEx:
+                    return new HttpStatus(IsTransientProviderStatus(clientEx.Status));
+                case HttpRequestException { StatusCode: { } httpStatus }:
+                    return new HttpStatus(httpStatus is
+                        HttpStatusCode.RequestTimeout or
+                        HttpStatusCode.TooManyRequests or
+                        HttpStatusCode.InternalServerError or
+                        HttpStatusCode.BadGateway or
+                        HttpStatusCode.ServiceUnavailable or
+                        HttpStatusCode.GatewayTimeout);
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsTransientProviderStatus(int status) =>
+        status is 408 or 429 or (>= 500 and <= 599);
 
     private static T? FindInner<T>(Exception? ex) where T : Exception
     {

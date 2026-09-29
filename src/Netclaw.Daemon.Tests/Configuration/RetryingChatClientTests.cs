@@ -22,48 +22,18 @@ public sealed class RetryingChatClientTests
         MaxDelay = TimeSpan.FromMilliseconds(10)
     };
 
-    public static TheoryData<string, Func<Exception>, int, int> RetryableTransientFailureCases { get; } = new()
-    {
-        {
-            "429",
-            () => new HttpRequestException("rate limited", null, HttpStatusCode.TooManyRequests),
-            2,
-            3
-        },
-        {
-            "500",
-            () => new HttpRequestException("server error", null, HttpStatusCode.InternalServerError),
-            1,
-            2
-        },
-        {
-            "StatuslessHttpRequestException",
-            () => new HttpRequestException("connection reset"),
-            1,
-            2
-        },
-        {
-            "TaskCanceledTimeout",
-            () => new TaskCanceledException("request timed out"),
-            1,
-            2
-        }
-    };
-
-    [Theory]
-    [MemberData(nameof(RetryableTransientFailureCases))]
-    public async Task RetriesOnTransientFailure_ThenSucceeds(
-        string name,
-        Func<Exception> makeException,
-        int failuresBeforeSuccess,
-        int expectedAttempts)
+    // Which exceptions are transient is covered once, in
+    // Netclaw.Configuration.Tests.RetryPolicyTests; these tests cover how the decorator
+    // applies that decision.
+    [Fact]
+    public async Task RetriesOnTransientFailure_ThenSucceeds()
     {
         var attempts = 0;
         var fake = new FakeChatClient((_, _, _) =>
         {
             attempts++;
-            if (attempts <= failuresBeforeSuccess)
-                throw makeException();
+            if (attempts <= 2)
+                throw new HttpRequestException("rate limited", null, HttpStatusCode.TooManyRequests);
             return Task.FromResult(new ChatResponse([new ChatMessage(ChatRole.Assistant, "ok")]));
         });
 
@@ -71,7 +41,7 @@ public sealed class RetryingChatClientTests
         var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal("ok", response.Messages[0].Text);
-        Assert.True(attempts == expectedAttempts, $"case {name}: expected {expectedAttempts} attempts, got {attempts}");
+        Assert.Equal(3, attempts); // 2 failures + 1 success
     }
 
     [Fact]

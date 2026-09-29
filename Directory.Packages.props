@@ -62,6 +62,10 @@
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="$(MicrosoftAspNetCoreVersion)" />
     <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="$(MicrosoftExtensionsAIVersion)" />
     <PackageVersion Include="OpenAI" Version="$(OpenAIVersion)" />
+    <!-- Referenced directly by Netclaw.Configuration so RetryPolicy can read the HTTP status
+         on the OpenAI SDK's ClientResultException. Keep at (or above) the version OpenAI
+         resolves transitively; transitive pinning otherwise reports a downgrade. -->
+    <PackageVersion Include="System.ClientModel" Version="1.14.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="$(MicrosoftAspNetCoreVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="$(MicrosoftAspNetCoreVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="$(MicrosoftAspNetCoreVersion)" />
