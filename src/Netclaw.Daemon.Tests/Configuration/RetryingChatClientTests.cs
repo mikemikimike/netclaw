@@ -279,6 +279,84 @@ public sealed class RetryingChatClientTests
         Assert.Equal(1, attempts);
     }
 
+    [Fact]
+    public async Task StreamingRetries_ResponseEndedAfterLifecycleUpdates_WithoutLeakingFailedAttempt()
+    {
+        // #2262: OpenAIResponsesChatClient yields content-free updates for
+        // response.created / in_progress / output_item.added as soon as headers arrive.
+        // Those must not commit the stream, and none of the failed attempt's ids may
+        // reach the aggregated response.
+        var attempts = 0;
+        var fake = new FakeChatClient(streamHandler: (_, _, ct) =>
+        {
+            attempts++;
+            return LifecycleThenResponseEndedOrText($"resp_{attempts}", fail: attempts == 1, ct);
+        });
+        var client = new RetryingChatClient(fake, _policy, NullLogger.Instance);
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in client.GetStreamingResponseAsync(
+            [new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken))
+        {
+            updates.Add(u);
+        }
+
+        Assert.Equal(2, attempts);
+        Assert.DoesNotContain(updates, u => u.ResponseId == "resp_1" || u.MessageId == "msg_resp_1");
+
+        var response = updates.ToChatResponse();
+        var message = Assert.Single(response.Messages);
+        Assert.Equal("ok", message.Text);
+        Assert.Equal("msg_resp_2", message.MessageId);
+        Assert.Equal("resp_2", response.ResponseId);
+    }
+
+    [Fact]
+    public async Task Streaming_MetadataOnlyStream_ReleasesHeldUpdatesOnCompletion()
+    {
+        var created = new ChatResponseUpdate { ResponseId = "resp_1", MessageId = "msg_1", Role = ChatRole.Assistant };
+        var fake = new FakeChatClient(streamHandler: (_, _, ct) => YieldOnly(created, ct));
+        var client = new RetryingChatClient(fake, _policy, NullLogger.Instance);
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in client.GetStreamingResponseAsync(
+            [new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken))
+        {
+            updates.Add(u);
+        }
+
+        Assert.Contains(created, updates);
+        Assert.Equal("resp_1", updates.ToChatResponse().ResponseId);
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> LifecycleThenResponseEndedOrText(
+        string responseId, bool fail,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return new ChatResponseUpdate { ResponseId = responseId, Role = ChatRole.Assistant };
+        yield return new ChatResponseUpdate { ResponseId = responseId, MessageId = "msg_" + responseId, Role = ChatRole.Assistant };
+        if (fail)
+            throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
+
+        yield return new ChatResponseUpdate
+        {
+            ResponseId = responseId,
+            MessageId = "msg_" + responseId,
+            Role = ChatRole.Assistant,
+            Contents = [new TextContent("ok")]
+        };
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> YieldOnly(
+        ChatResponseUpdate update, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return update;
+    }
+
     private static async IAsyncEnumerable<ChatResponseUpdate> ThrowResponseEndedThenYield(
         int attemptNumber, int failUntil,
         [EnumeratorCancellation] CancellationToken cancellationToken)

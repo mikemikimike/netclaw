@@ -13,9 +13,10 @@ namespace Netclaw.Daemon.Configuration;
 /// <summary>
 /// Decorates an <see cref="IChatClient"/> with retry logic for transient failures.
 /// Both the non-streaming and streaming calls are retried. Streaming is retried
-/// only <b>before the first chunk is yielded</b> — once any update has been emitted
-/// downstream, a later failure propagates unchanged so already-streamed output is
-/// never duplicated by a restart.
+/// only <b>before the stream commits</b> — i.e. before the first substantive update
+/// (see <see cref="StreamCommitGate"/>). Content-free lifecycle updates emitted ahead
+/// of the first token do not commit it. Once committed, a later failure propagates
+/// unchanged so already-streamed output is never duplicated by a restart.
 /// </summary>
 public sealed class RetryingChatClient : DelegatingChatClient
 {
@@ -67,8 +68,8 @@ public sealed class RetryingChatClient : DelegatingChatClient
 
         while (true)
         {
-            var yieldedChunk = false;
-            Exception? preFirstChunkFailure = null;
+            var gate = new StreamCommitGate();
+            Exception? preCommitFailure = null;
 
             // Initiation can throw before any enumerator is produced.
             IAsyncEnumerable<ChatResponseUpdate> stream;
@@ -87,33 +88,36 @@ public sealed class RetryingChatClient : DelegatingChatClient
             await using var enumerator = stream.GetAsyncEnumerator(cancellationToken);
             while (true)
             {
-                ChatResponseUpdate update;
+                IReadOnlyList<ChatResponseUpdate> toEmit;
+                bool ended;
                 try
                 {
-                    if (!await enumerator.MoveNextAsync())
-                        break;
-
-                    update = enumerator.Current;
+                    ended = !await enumerator.MoveNextAsync();
+                    toEmit = ended ? gate.Complete() : gate.Accept(enumerator.Current);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested
-                                           && !yieldedChunk
+                                           && !gate.Committed
                                            && _policy.ShouldRetry(ex, attempt))
                 {
-                    // Pre-first-chunk failure: safe to restart (nothing emitted yet).
-                    preFirstChunkFailure = ex;
+                    // Pre-commit failure: safe to restart. Only information-free
+                    // keepalives were emitted; the held updates die with the gate.
+                    preCommitFailure = ex;
                     break;
                 }
 
-                // Past this point a chunk has been emitted; a later failure is NOT
-                // caught above (yieldedChunk is true) and propagates to the consumer.
-                yieldedChunk = true;
-                yield return update;
+                // Once committed, a later failure is NOT caught above and propagates
+                // to the consumer.
+                foreach (var update in toEmit)
+                    yield return update;
+
+                if (ended)
+                    break;
             }
 
-            if (preFirstChunkFailure is null)
-                yield break; // clean completion (or a post-first-chunk throw already unwound)
+            if (preCommitFailure is null)
+                yield break; // clean completion (or a post-commit throw already unwound)
 
-            await BackoffAsync(preFirstChunkFailure, attempt, cancellationToken);
+            await BackoffAsync(preCommitFailure, attempt, cancellationToken);
             attempt++;
             // outer loop re-initiates the stream
         }

@@ -216,6 +216,29 @@ public sealed class RoutingChatClientTests
     }
 
     [Fact]
+    public async Task Streaming_FailsOver_WhenPrimaryDropsAfterLifecycleUpdatesOnly()
+    {
+        // Content-free lifecycle updates (response.created etc.) do not commit the
+        // primary's stream, so a ResponseEnded before the first token still fails over,
+        // and none of the primary's ids leak into the aggregated response.
+        var sink = new CapturingSink();
+        var primary = new FakeChatClient(streamHandler: (_, _, ct) => LifecycleThenResponseEndedAsync(ct));
+        var fallback = new FakeChatClient(streamHandler: (_, _, ct) => SingleTextUpdateAsync("fallback", ct));
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in Client(sink, primary, fallback).GetStreamingResponseAsync(
+            [new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken))
+        {
+            updates.Add(u);
+        }
+
+        Assert.DoesNotContain(updates, u => u.ResponseId == "resp_primary" || u.MessageId == "msg_primary");
+        var message = Assert.Single(updates.ToChatResponse().Messages);
+        Assert.Equal("fallback", message.Text);
+        Assert.Contains(sink.Alerts, a => a.Category == AlertType.ProviderFailover);
+    }
+
+    [Fact]
     public async Task Streaming_DoesNotFailover_AfterPrimaryAlreadyYielded()
     {
         var sink = new CapturingSink();
@@ -325,6 +348,15 @@ public sealed class RoutingChatClientTests
             throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
 
         yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("unused")] };
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> LifecycleThenResponseEndedAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return new ChatResponseUpdate { ResponseId = "resp_primary", MessageId = "msg_primary", Role = ChatRole.Assistant };
+        throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
     }
 
     private static async IAsyncEnumerable<ChatResponseUpdate> YieldThenThrowAsync(
