@@ -23,9 +23,12 @@ public sealed class OpenAiDescriptor : IProviderDescriptor
 {
     internal const string CodexBackendEndpoint = "https://chatgpt.com/backend-api/codex";
 
-    // The Codex backend gates model catalog entries by Codex CLI client version.
+    // The Codex backend gates model catalog entries by Codex CLI client version:
+    // a stale value silently hides newer models from discovery (#1831, #2259).
     // This must track the official @openai/codex release, not Netclaw's version.
-    internal const string CodexModelCatalogClientVersion = "0.147.0";
+    // To refresh: use the latest stable (non-alpha) rust-v* tag from
+    // `gh release list -R openai/codex`.
+    internal const string CodexModelCatalogClientVersion = "0.159.0";
 
     private readonly HttpClient _httpClient;
     private readonly TimeProvider _timeProvider;
