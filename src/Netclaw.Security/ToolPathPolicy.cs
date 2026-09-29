@@ -144,7 +144,7 @@ public sealed class ToolPathPolicy
         if (!string.IsNullOrWhiteSpace(workingDirectory) && IsShellDenied(workingDirectory))
             return true;
 
-        var words = ParserWords(analysis).ToList();
+        var tokens = LegacyShellTextScan.Tokenize(command).ToList();
         var slashCommand = command.Replace('\\', '/');
         foreach (var indicator in _commandIndicators)
         {
@@ -157,7 +157,7 @@ public sealed class ToolPathPolicy
             return true;
         }
 
-        foreach (var token in words)
+        foreach (var token in tokens)
         {
             if (!LooksLikePath(token))
                 continue;
@@ -182,26 +182,13 @@ public sealed class ToolPathPolicy
         }
 
         if (DefaultLayoutHints.Any(hint => slashCommand.Contains(hint.Fragment, StringComparison.OrdinalIgnoreCase))
-            && words.Any(ShellVerbPolicyData.HighRiskVerbs.Contains))
+            && tokens.Any(token => ShellVerbPolicyData.HighRiskVerbs.Contains(LegacyShellTextScan.TrimShellPunctuation(token))))
         {
             return true;
         }
 
         return false;
     }
-
-    /// <summary>
-    /// Returns the parser-decoded words of every clause in the analysis: verbs,
-    /// arguments, and redirect targets. Unresolved input contributes its
-    /// deny-only clauses. Source that the parser rejects has no words.
-    /// </summary>
-    private static IEnumerable<string> ParserWords(ShellCommandAnalysis analysis)
-        => analysis.Commands
-            .Select(static occurrence => occurrence.Clause)
-            .Concat(analysis.DenyOnlyClauses)
-            .SelectMany(static clause => clause.Verb.Tokens.Concat(clause.Elements
-                .Where(static element => element.Role != ClauseElementRole.Verb)
-                .Select(static element => element.Value)));
 
     private bool StructuredAnalysisReferencesDeniedPath(
         ShellCommandAnalysis analysis)

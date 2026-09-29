@@ -1071,7 +1071,7 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
     /// separator plus a traversal segment or a file extension. URLs, Git refs,
     /// scoped packages, and sed expressions do not count.
     /// </summary>
-    private static bool LooksLikeUnitPath(string word, ShellPathStyle pathStyle)
+    internal static bool LooksLikeUnitPath(string word, ShellPathStyle pathStyle)
     {
         var isWindows = pathStyle == ShellPathStyle.Windows;
         if (string.IsNullOrWhiteSpace(word)

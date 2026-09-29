@@ -230,32 +230,6 @@ public sealed class ShellExecutionEnvironment
         };
     }
 
-    /// <summary>
-    /// Parses unresolved source for the hard-deny and protected-path screen only.
-    /// </summary>
-    /// <remarks>
-    /// The screen assumes a bounded initial state that this environment did not
-    /// prove. PowerShell also uses the PowerShell 7 grammar, a superset of 5.1.
-    /// So the screen facts never authorize a command. They can only add a
-    /// denial to input that stays unresolved for approval.
-    /// </remarks>
-    internal ParsedCommand ParseForProhibitionScreen(
-        string source,
-        string? workingDirectory,
-        BashInitialStateMode assumedBashState)
-        => Grammar == ShellGrammar.Bash
-            ? new BashParser(new BashParserOptions
-            {
-                WorkingDirectory = workingDirectory,
-                InitialStateMode = assumedBashState
-            }).Parse(source)
-            : new PwshParser(new PwshParserOptions
-            {
-                WorkingDirectory = workingDirectory,
-                InitialStateMode = PwshInitialStateMode.IsolatedNonInteractiveNoProfile,
-                Dialect = PwshDialect.PowerShell7
-            }).Parse(source);
-
     internal bool TryProjectFiniteBashScopes(
         string source,
         string? workingDirectory,

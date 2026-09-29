@@ -194,10 +194,8 @@ public sealed class ShellCommandPolicy
         if (!denyOnlyDecision.Allowed)
             return denyOnlyDecision;
 
-        // Unresolved input has only the deny-only clauses above. The analyzer
-        // parses them for this check. They never become approval candidates.
         if (analysis.Failure == ShellAnalysisFailure.Unresolved || analysis.Commands.Count == 0)
-            return ShellCommandDecision.Allow();
+            return EvaluateLegacySegments(analysis.Source);
 
         foreach (var occurrence in analysis.Commands)
         {
@@ -214,13 +212,28 @@ public sealed class ShellCommandPolicy
     {
         foreach (var clause in clauses)
         {
-            // PowerShell deny-only clauses come from a failed parse and keep
-            // their authored elements. Bash screen clauses are complete parses.
-            var decision = Environment.Grammar == ShellGrammar.PowerShell
-                ? EvaluateDenyOnlyClause(clause)
-                : EvaluateClause(clause);
+            var decision = EvaluateDenyOnlyClause(clause);
             if (!decision.Allowed)
                 return decision;
+        }
+
+        return ShellCommandDecision.Allow();
+    }
+
+    private ShellCommandDecision EvaluateLegacySegments(string command)
+    {
+        // The approval matcher does not persist unresolved syntax. Keep the
+        // legacy scan here so known deny forms still fail at this boundary.
+        foreach (var segment in LegacyShellTextScan.GetAllCommandSegments(command))
+        {
+            var tokens = LegacyShellTextScan.Tokenize(segment)
+                .Select(static token => DenyToken.Known(token))
+                .ToList();
+            foreach (var pattern in _denyPatterns)
+            {
+                if (pattern.Matches(tokens))
+                    return ShellCommandDecision.Deny(pattern.Reason, pattern.Category);
+            }
         }
 
         return ShellCommandDecision.Allow();
@@ -316,10 +329,7 @@ public sealed class ShellCommandPolicy
 
     private static DenyPattern? ParseDenyPattern(string raw)
     {
-        // A configured pattern is a list of words, not shell source.
-        var tokens = raw.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
-            .Select(TrimStaticQuotes)
-            .ToList();
+        var tokens = LegacyShellTextScan.Tokenize(raw).ToList();
         if (tokens.Count == 0)
             return null;
 
@@ -445,7 +455,7 @@ public sealed class ShellCommandPolicy
                 if (!tokens[i].IsKnown)
                     return false;
 
-                var tokenVerb = TrimShellPunctuation(tokens[i].Value);
+                var tokenVerb = LegacyShellTextScan.TrimShellPunctuation(tokens[i].Value);
                 if (!string.Equals(tokenVerb, VerbChain[i], StringComparison.OrdinalIgnoreCase))
                     return false;
             }
@@ -472,7 +482,7 @@ public sealed class ShellCommandPolicy
             {
                 var token = tokens[i];
                 var value = token.IsKnown ? token.Value : token.AuthoredValue;
-                var normalized = TrimShellPunctuation(value);
+                var normalized = LegacyShellTextScan.TrimShellPunctuation(value);
                 if (!string.Equals(
                         normalized,
                         VerbChain[i],
@@ -500,7 +510,7 @@ public sealed class ShellCommandPolicy
             if (tokens.Count == 0 || !tokens[0].IsKnown)
                 return false;
 
-            var verb = TrimShellPunctuation(tokens[0].Value);
+            var verb = LegacyShellTextScan.TrimShellPunctuation(tokens[0].Value);
             return verb.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
         }
     }
@@ -522,7 +532,7 @@ public sealed class ShellCommandPolicy
             if (tokens.Count == 0 || !tokens[0].IsKnown)
                 return false;
 
-            var verb = TrimShellPunctuation(tokens[0].Value);
+            var verb = LegacyShellTextScan.TrimShellPunctuation(tokens[0].Value);
             return KillVerbs.Contains(verb);
         }
     }
@@ -545,7 +555,7 @@ public sealed class ShellCommandPolicy
             if (tokens.Count == 0 || !tokens[0].IsKnown)
                 return false;
 
-            var verb = TrimShellPunctuation(tokens[0].Value);
+            var verb = LegacyShellTextScan.TrimShellPunctuation(tokens[0].Value);
             if (EscalationVerbs.Contains(verb))
                 return true;
 
@@ -557,7 +567,7 @@ public sealed class ShellCommandPolicy
                 if (!tokens[i].IsKnown)
                     continue;
 
-                var token = TrimShellPunctuation(tokens[i].Value);
+                var token = LegacyShellTextScan.TrimShellPunctuation(tokens[i].Value);
                 if (!TryReadParameter(token, out var parameterName, out var inlineValue)
                     || !IsParameterAbbreviation(parameterName, "Verb"))
                 {
@@ -581,7 +591,7 @@ public sealed class ShellCommandPolicy
 
         private static bool IsRunAsValue(string token)
             => string.Equals(
-                TrimStaticQuotes(TrimShellPunctuation(token)),
+                TrimStaticQuotes(LegacyShellTextScan.TrimShellPunctuation(token)),
                 "RunAs",
                 StringComparison.OrdinalIgnoreCase);
     }
@@ -597,7 +607,7 @@ public sealed class ShellCommandPolicy
             if (tokens.Count < 2 || !tokens[0].IsKnown)
                 return false;
 
-            var verb = TrimShellPunctuation(tokens[0].Value);
+            var verb = LegacyShellTextScan.TrimShellPunctuation(tokens[0].Value);
             var isBashRemove = string.Equals(verb, "rm", StringComparison.OrdinalIgnoreCase);
             var isPowerShellRemove = string.Equals(
                 verb,
@@ -666,7 +676,7 @@ public sealed class ShellCommandPolicy
 
         private static bool IsDangerousRemoveTarget(string token)
         {
-            token = TrimStaticQuotes(TrimShellPunctuation(token));
+            token = TrimStaticQuotes(LegacyShellTextScan.TrimShellPunctuation(token));
             if (TryReadParameter(token, out _, out var inlineValue))
             {
                 if (inlineValue is null)
@@ -697,7 +707,7 @@ public sealed class ShellCommandPolicy
 
         private static bool IsAuthoredHomeVariable(string token)
         {
-            var trimmed = TrimStaticQuotes(TrimShellPunctuation(token))
+            var trimmed = TrimStaticQuotes(LegacyShellTextScan.TrimShellPunctuation(token))
                 .TrimEnd('/', '\\');
             return trimmed is "$HOME" or "${HOME}"
                 or "$env:USERPROFILE" or "${env:USERPROFILE}";
@@ -769,12 +779,12 @@ public sealed class ShellCommandPolicy
     private static bool IsExactlyAuthoredFalse(string value, string authoredValue)
     {
         if (!TryReadParameter(
-                TrimShellPunctuation(value),
+                LegacyShellTextScan.TrimShellPunctuation(value),
                 out _,
                 out var decodedValue)
             || !IsBooleanFalse(decodedValue)
             || !TryReadParameter(
-                TrimShellPunctuation(authoredValue),
+                LegacyShellTextScan.TrimShellPunctuation(authoredValue),
                 out _,
                 out var rawValue))
         {
@@ -789,9 +799,6 @@ public sealed class ShellCommandPolicy
         => value is not null
            && (TrimStaticQuotes(value).Equals("$false", StringComparison.OrdinalIgnoreCase)
                || TrimStaticQuotes(value).Equals("${false}", StringComparison.OrdinalIgnoreCase));
-
-    private static string TrimShellPunctuation(string token)
-        => token.Trim().TrimStart(';', '|', '&').TrimEnd(';', '|', '&');
 
     private static string TrimStaticQuotes(string token)
     {
@@ -828,7 +835,7 @@ public sealed class ShellCommandPolicy
                 if (!tokens[i].IsKnown)
                     return false;
 
-                var tokenVerb = TrimShellPunctuation(tokens[i].Value);
+                var tokenVerb = LegacyShellTextScan.TrimShellPunctuation(tokens[i].Value);
                 if (!string.Equals(tokenVerb, VerbChain[i], StringComparison.OrdinalIgnoreCase))
                     return false;
             }
