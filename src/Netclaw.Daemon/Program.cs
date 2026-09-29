@@ -83,7 +83,7 @@ catch (NetclawDirectoryInitializationException ex)
 
 using var crashMonitor = DaemonCrashMonitor.Register(
     bootstrapPaths,
-    benignUnobservedFilters: [KnownBenignExceptions.McpClientTransportSendFailure]);
+    benignUnobservedFilters: [KnownBenignExceptions.IsMcpSessionSendFailure]);
 
 try
 {

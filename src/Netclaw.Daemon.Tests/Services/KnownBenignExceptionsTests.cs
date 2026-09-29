@@ -3,111 +3,97 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using ModelContextProtocol.Client;
+using Netclaw.Configuration.Http;
 using Netclaw.Daemon.Services;
+using Netclaw.Daemon.Tests.Mcp;
 using Xunit;
 
 namespace Netclaw.Daemon.Tests.Services;
 
 public sealed class KnownBenignExceptionsTests
 {
-    // Frames from the #2258 crash log: a 502 from an HTTP MCP server, thrown from the
-    // SDK's fire-and-forget ProcessMessageAsync.
-    private const string StreamableHttpSendStack =
-        "   at ModelContextProtocol.HttpResponseMessageExtensions.EnsureSuccessStatusCodeWithResponseBodyAsync(HttpResponseMessage response, CancellationToken cancellationToken)\n"
-        + "   at ModelContextProtocol.Client.StreamableHttpClientSessionTransport.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)\n"
-        + "   at ModelContextProtocol.McpSessionHandler.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)\n"
-        + "   at ModelContextProtocol.McpSessionHandler.<>c__DisplayClass36_1.<<ProcessMessagesCoreAsync>g__ProcessMessageAsync|1>d.MoveNext()";
-
-    // Discarded notifications/cancelled send from McpSessionHandler.RegisterCancellation.
-    private const string SseCancelledNotificationStack =
-        "   at System.Net.Http.HttpConnection.SendAsync(HttpRequestMessage request, Boolean async, CancellationToken cancellationToken)\n"
-        + "   at ModelContextProtocol.Client.SseClientSessionTransport.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)\n"
+    // Shutdown case: McpSessionHandler.SendMessageAsync throws at ThrowIfCancellationRequested()
+    // before any transport frame. Hard to produce for real without racing the session teardown.
+    private const string SessionHandlerOnlyStack =
+        "   at System.Threading.CancellationToken.ThrowOperationCanceledException()\n"
         + "   at ModelContextProtocol.McpSessionHandler.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)";
-
-    private const string StdioSendStack =
-        "   at ModelContextProtocol.Client.StdioClientSessionTransport.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)\n"
-        + "   at ModelContextProtocol.McpSessionHandler.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)";
-
-    // A transport frame without the session handler frame: Netclaw called the
-    // transport itself, so Netclaw owns the task and a leak is a Netclaw bug.
-    private const string TransportOnlyStack =
-        "   at ModelContextProtocol.Client.StreamableHttpClientSessionTransport.SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken)\n"
-        + "   at Netclaw.Daemon.Mcp.McpClientManager.SomethingAsync()";
 
     [Fact]
-    public void IsMcpClientTransportSendFailure_NonMcpHttpRequestExceptionWithRealStack_IsNotBenign()
+    public async Task Real_sdk_send_failure_on_502_is_benign()
+    {
+        var exception = await CaptureSdkNotificationSendFailureAsync();
+
+        Assert.True(KnownBenignExceptions.IsMcpSessionSendFailure(exception));
+        Assert.True(KnownBenignExceptions.IsMcpSessionSendFailure(new AggregateException(exception)));
+        Assert.True(KnownBenignExceptions.IsMcpSessionSendFailure(
+            new AggregateException(new AggregateException(exception))));
+    }
+
+    [Fact]
+    public async Task Aggregate_with_one_non_mcp_exception_is_not_benign()
+    {
+        var exception = await CaptureSdkNotificationSendFailureAsync();
+
+        Assert.False(KnownBenignExceptions.IsMcpSessionSendFailure(
+            new AggregateException(exception, new InvalidOperationException("daemon bug"))));
+    }
+
+    [Fact]
+    public void Non_mcp_http_request_exception_with_real_stack_is_not_benign()
     {
         var exception = CaptureThrown(() =>
             throw new HttpRequestException("Response status code does not indicate success: 502 (Bad Gateway)."));
 
         Assert.NotNull(exception.StackTrace);
-        Assert.False(KnownBenignExceptions.IsMcpClientTransportSendFailure(exception));
-        Assert.False(KnownBenignExceptions.IsMcpClientTransportSendFailure(new AggregateException(exception)));
+        Assert.False(KnownBenignExceptions.IsMcpSessionSendFailure(exception));
+        Assert.False(KnownBenignExceptions.IsMcpSessionSendFailure(new AggregateException(exception)));
     }
 
-    [Theory]
-    [MemberData(nameof(PredicateCases))]
-    public void IsMcpClientTransportSendFailure_MatchesExpected(string caseName, Exception? exception, bool expected)
+    [Fact]
+    public void Cancellation_inside_session_handler_send_is_benign()
     {
-        Assert.True(
-            expected == KnownBenignExceptions.IsMcpClientTransportSendFailure(exception),
-            $"Case '{caseName}' expected benign={expected}.");
+        Assert.True(KnownBenignExceptions.IsMcpSessionSendFailure(
+            new AggregateException(new FakeOperationCanceledException(SessionHandlerOnlyStack))));
     }
 
-    public static IEnumerable<object?[]> PredicateCases()
+    [Fact]
+    public void Non_transport_exception_type_with_session_handler_frame_is_not_benign()
     {
-        yield return ["null", null, false];
+        Assert.False(KnownBenignExceptions.IsMcpSessionSendFailure(
+            new AggregateException(new FakeInvalidOperationException(SessionHandlerOnlyStack))));
+    }
 
-        // The exact #2258 shape: finalizer-thread AggregateException around the 502.
-        yield return [
-            "streamable-http 502 in aggregate",
-            new AggregateException(new FakeHttpRequestException("502 (Bad Gateway)", StreamableHttpSendStack)),
-            true];
+    [Fact]
+    public void Null_and_empty_aggregate_are_not_benign()
+    {
+        Assert.False(KnownBenignExceptions.IsMcpSessionSendFailure(null));
+        Assert.False(KnownBenignExceptions.IsMcpSessionSendFailure(new AggregateException()));
+    }
 
-        yield return [
-            "streamable-http 502 bare",
-            new FakeHttpRequestException("502 (Bad Gateway)", StreamableHttpSendStack),
-            true];
+    /// <summary>
+    /// Sends a notification through the real SDK to a server that answers 502, and returns
+    /// the exception with its real SDK stack.
+    /// </summary>
+    internal static async Task<HttpRequestException> CaptureSdkNotificationSendFailureAsync()
+    {
+        var server = new ScriptedMcpHttpHandler(_ => ScriptedMcpHttpHandler.BadGateway());
+        await using var client = await McpClient.CreateAsync(
+            new HttpClientTransport(
+                new HttpClientTransportOptions
+                {
+                    Endpoint = new Uri("https://example.invalid/mcp"),
+                    Name = "flaky-server",
+                    TransportMode = HttpTransportMode.StreamableHttp,
+                },
+                McpHttpClientFactory.Create(server),
+                ownsHttpClient: true),
+            new McpClientOptions(),
+            cancellationToken: TestContext.Current.CancellationToken);
 
-        yield return [
-            "sse cancelled-notification IOException",
-            new AggregateException(new FakeIOException("connection reset", SseCancelledNotificationStack)),
-            true];
-
-        yield return [
-            "stdio send TaskCanceledException",
-            new AggregateException(new FakeTaskCanceledException(StdioSendStack)),
-            true];
-
-        yield return [
-            "nested aggregate",
-            new AggregateException(new AggregateException(
-                new FakeHttpRequestException("502 (Bad Gateway)", StreamableHttpSendStack))),
-            true];
-
-        // Right frames, wrong exception type: a daemon bug surfaced through the SDK.
-        yield return [
-            "InvalidOperationException with MCP frames",
-            new AggregateException(new FakeInvalidOperationException(StreamableHttpSendStack)),
-            false];
-
-        yield return [
-            "transport frame without session handler frame",
-            new AggregateException(new FakeHttpRequestException("502 (Bad Gateway)", TransportOnlyStack)),
-            false];
-
-        yield return [
-            "HttpRequestException without stack",
-            new AggregateException(new FakeHttpRequestException("502 (Bad Gateway)", stackTrace: null)),
-            false];
-
-        // One MCP failure and one real bug in the same aggregate: keep the crash report.
-        yield return [
-            "mixed aggregate",
-            new AggregateException(
-                new FakeHttpRequestException("502 (Bad Gateway)", StreamableHttpSendStack),
-                new InvalidOperationException("daemon bug")),
-            false];
+        return await Assert.ThrowsAsync<HttpRequestException>(() => client.SendNotificationAsync(
+            "notifications/netclaw-test",
+            cancellationToken: TestContext.Current.CancellationToken));
     }
 
     private static Exception CaptureThrown(Action action)
@@ -124,22 +110,12 @@ public sealed class KnownBenignExceptionsTests
         throw new InvalidOperationException("Expected the action to throw.");
     }
 
-    private sealed class FakeHttpRequestException(string message, string? stackTrace) : HttpRequestException(message)
+    private sealed class FakeOperationCanceledException(string stackTrace) : OperationCanceledException
     {
         public override string? StackTrace => stackTrace;
     }
 
-    private sealed class FakeIOException(string message, string? stackTrace) : IOException(message)
-    {
-        public override string? StackTrace => stackTrace;
-    }
-
-    private sealed class FakeTaskCanceledException(string? stackTrace) : TaskCanceledException
-    {
-        public override string? StackTrace => stackTrace;
-    }
-
-    private sealed class FakeInvalidOperationException(string? stackTrace) : InvalidOperationException
+    private sealed class FakeInvalidOperationException(string stackTrace) : InvalidOperationException
     {
         public override string? StackTrace => stackTrace;
     }
