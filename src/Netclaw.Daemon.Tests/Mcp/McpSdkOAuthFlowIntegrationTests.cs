@@ -910,7 +910,7 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         => entry.StartsWith("OAuth refresh failure diagnostics", StringComparison.Ordinal);
 
     private static bool IsRejectedRefreshGrant(string entry)
-        => entry.Contains("rejected a refresh grant: HTTP 400 error=invalid_grant", StringComparison.Ordinal);
+        => entry.Contains("rejected a refresh grant for MCP server 'fake-oauth': HTTP 400 error=invalid_grant", StringComparison.Ordinal);
 
     /// <summary>
     /// Moves the stored access token's lifetime into the past, the state a daemon finds its
@@ -1028,6 +1028,7 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         bool failToolListing,
         ILogger logger) : IMcpClientRuntime
     {
+        private readonly McpClientRuntime _production = new(logger, server.CreateTestServerHandler());
         private int _createCount;
         private int _failNextToolListing;
 
@@ -1044,10 +1045,10 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         public IClientTransport CreateHttpTransport(HttpClientTransportOptions options)
         {
             LastHttpOptions = options;
-            // Mirror the production runtime: the SDK's OAuth token exchange runs through the
-            // rejection handler, so a 400 invalid_client surfaces instead of the SDK's
-            // protocol fallback masking it.
-            return new HttpClientTransport(options, server.CreateTransportHttpClient(logger), ownsHttpClient: true);
+            // The production runtime builds the transport over the in-memory server, so every
+            // OAuth test runs the production handler chain: the invalid_client rejection
+            // handler and the per-connection refresh grant handler.
+            return _production.CreateHttpTransport(options);
         }
 
         public Task<McpClient> CreateAsync(
@@ -1295,24 +1296,8 @@ public sealed class McpSdkOAuthFlowIntegrationTests
             return client;
         }
 
-        /// <summary>
-        /// Builds the client the SDK transport uses, wrapping the in-memory test server with
-        /// the same OAuth handlers the production runtime installs.
-        /// </summary>
-        public HttpClient CreateTransportHttpClient(ILogger logger)
-        {
-            var client = new HttpClient(new OAuthClientRejectionHandler
-            {
-                InnerHandler = new OAuthRefreshFailureLogHandler(logger)
-                {
-                    InnerHandler = _app.GetTestServer().CreateHandler(),
-                },
-            })
-            {
-                BaseAddress = _state.Origin,
-            };
-            return client;
-        }
+        /// <summary>Returns a handler that sends requests to the in-memory server.</summary>
+        public HttpMessageHandler CreateTestServerHandler() => _app.GetTestServer().CreateHandler();
 
         public async Task<BrowserAuthorizationResult> AuthorizeAsync(
             Uri authorizationUri,

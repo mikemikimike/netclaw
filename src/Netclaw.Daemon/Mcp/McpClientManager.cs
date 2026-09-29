@@ -1735,7 +1735,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     /// builds the token container and the provider options from one identity, so the client
     /// secret and the token endpoint auth method cannot block the refresh. A public client has
     /// no secret by design. This line reports the stored fields that block a refresh. When
-    /// none block it, <see cref="OAuthRefreshFailureLogHandler"/> logs the token endpoint
+    /// none block it, <see cref="OAuthRefreshGrantHandler"/> logs the token endpoint
     /// response if the authorization server rejected the grant.
     /// </summary>
     private void LogOAuthRefreshFailureDiagnostics(string serverName, string? resourceUrl)
@@ -2304,20 +2304,41 @@ internal interface IMcpClientRuntime
     ValueTask DisposeAsync(McpClient client);
 }
 
-internal sealed class McpClientRuntime(ILogger<McpClientRuntime> logger) : IMcpClientRuntime
+internal sealed class McpClientRuntime : IMcpClientRuntime
 {
+    private readonly ILogger _logger;
+    private readonly HttpMessageHandler _primaryHandler;
+
+    public McpClientRuntime(ILogger<McpClientRuntime> logger)
+        : this(logger, McpHttpClientFactory.SharedPrimaryHandler)
+    {
+    }
+
     /// <summary>
-    /// The daemon's MCP connection pool. It is the shared client stack plus a handler that
-    /// logs rejected OAuth refresh grants, which the SDK otherwise discards.
+    /// Builds the runtime over <paramref name="primaryHandler"/>, which the runtime never
+    /// disposes. Tests pass an in-memory server here to drive the production handler chain.
     /// </summary>
-    private readonly HttpClient _httpClient = McpHttpClientFactory.Create(
-        new OAuthRefreshFailureLogHandler(logger)
-        {
-            InnerHandler = McpHttpClientFactory.CreatePrimaryHandler(),
-        });
+    internal McpClientRuntime(ILogger logger, HttpMessageHandler primaryHandler)
+    {
+        _logger = logger;
+        _primaryHandler = primaryHandler;
+    }
 
     public IClientTransport CreateHttpTransport(HttpClientTransportOptions options)
-        => new HttpClientTransport(options, _httpClient);
+        => new HttpClientTransport(
+            options,
+            CreateHttpClient(options.OAuth?.TokenCache as McpOAuthTokenCache),
+            ownsHttpClient: true);
+
+    /// <summary>
+    /// Builds the HTTP client of one connection. Each connection gets its own
+    /// <see cref="OAuthRefreshGrantHandler"/> bound to its token cache. All connections share
+    /// the process connection pool, which a disposed client leaves open.
+    /// </summary>
+    internal HttpClient CreateHttpClient(McpOAuthTokenCache? tokenCache)
+        => McpHttpClientFactory.Create(
+            new OAuthRefreshGrantHandler(_logger, tokenCache) { InnerHandler = _primaryHandler },
+            disposeHandler: false);
 
     public Task<McpClient> CreateAsync(
         IClientTransport transport,

@@ -10,7 +10,7 @@
 
 ### MCP OAuth
 
-- **A reconnect no longer loses a rotated refresh token.** A replacement connection reads the refresh token that the live connection rotated. A retired connection that completes a refresh now keeps the new refresh token ([#2263](https://github.com/netclaw-dev/netclaw/issues/2263)).
+- **A reconnect no longer loses a rotated refresh token.** Netclaw sends one refresh grant at a time for each MCP server, and each connection redeems the newest stored refresh token. A connection from before an explicit authorization cannot replace the credentials of that authorization ([#2263](https://github.com/netclaw-dev/netclaw/issues/2263)).
 - **Rejected refresh grants are logged.** The daemon logs the token endpoint status and the OAuth `error` fields when an authorization server rejects a refresh. The refresh diagnostic line no longer reports an absent client secret as a blocker ([#2263](https://github.com/netclaw-dev/netclaw/issues/2263)).
 
 ## 0.27.1-beta.1 (2026-09-24)

@@ -56,6 +56,7 @@ internal sealed class McpOAuthTokenCache : ITokenCache
         McpOAuthClientIdentity? identity,
         McpOAuthTokenSet? credentials,
         int baseRevision,
+        int grantEpoch,
         bool profileOwnsClientIdentity,
         bool explicitAuthorization)
     {
@@ -65,6 +66,7 @@ internal sealed class McpOAuthTokenCache : ITokenCache
         Identity = identity;
         Credentials = credentials;
         BaseRevision = baseRevision;
+        GrantEpoch = grantEpoch;
         ProfileOwnsClientIdentity = profileOwnsClientIdentity;
         ExplicitAuthorization = explicitAuthorization;
     }
@@ -77,7 +79,18 @@ internal sealed class McpOAuthTokenCache : ITokenCache
 
     internal McpOAuthTokenSet? Credentials { get; set; }
 
+    /// <summary>
+    /// The revision of the active record that this cache last read or wrote. A write from a
+    /// cache whose revision is behind the store is merged, not applied as-is.
+    /// </summary>
     internal int BaseRevision { get; set; }
+
+    /// <summary>
+    /// The grant epoch of the credentials this cache holds. Each published explicit
+    /// authorization starts a new epoch. A connection from an older epoch never reads or
+    /// writes the credentials of a newer authorization, even with the same client id.
+    /// </summary>
+    internal int GrantEpoch { get; set; }
 
     internal bool ProfileOwnsClientIdentity { get; }
 
@@ -97,7 +110,32 @@ internal sealed class McpOAuthTokenCache : ITokenCache
         _store.StoreTokens(this, tokens, cancellationToken);
         return default;
     }
+
+    /// <summary>Serializes refresh grants of every connection to this server.</summary>
+    internal SemaphoreSlim RefreshGate => _store.GetRefreshGate(ServerName);
+
+    /// <summary>
+    /// Returns the refresh token this connection must redeem: the active one, when this
+    /// cache follows the active record. Returns <c>null</c> when the connection must keep
+    /// the token it holds.
+    /// </summary>
+    internal string? GetRedeemableRefreshToken() => _store.GetRedeemableRefreshToken(this);
+
+    /// <summary>
+    /// Records a refresh grant that the token endpoint accepted, before the gate opens for
+    /// the next connection.
+    /// </summary>
+    internal void RecordRefreshGrant(string presentedRefreshToken, McpOAuthIssuedTokens issued)
+        => _store.RecordRefreshGrant(this, presentedRefreshToken, issued);
 }
+
+/// <summary>The token fields of an accepted token endpoint response.</summary>
+internal sealed record McpOAuthIssuedTokens(
+    string AccessToken,
+    string? RefreshToken,
+    int? ExpiresIn,
+    string TokenType,
+    string? Scope);
 
 /// <summary>
 /// Durable authority for active MCP OAuth credentials. The daemon lifecycle
@@ -179,6 +217,7 @@ internal sealed class McpOAuthCredentialStore
                 identity,
                 explicitAuthorization ? null : active,
                 state.Revision,
+                state.GrantEpoch,
                 configuredIdentity is not null,
                 explicitAuthorization);
         }
@@ -192,12 +231,9 @@ internal sealed class McpOAuthCredentialStore
             ThrowIfRetired(cache);
             if (cache.ExplicitAuthorization && cache.Credentials is null)
                 throw new InvalidOperationException("OAuth authorization completed without storing credentials.");
-            if (!cache.ExplicitAuthorization && cache.Dirty && cache.BaseRevision != state.Revision)
-            {
-                throw new McpOAuthRetiredCredentialWriterException(
-                    "Active OAuth credentials changed while the replacement connection initialized.");
-            }
 
+            // Only an explicit authorization is dirty: an ordinary cache persists every
+            // store immediately.
             if (cache.Dirty)
             {
                 var replacement = Clone(cache.Credentials)!;
@@ -207,6 +243,7 @@ internal sealed class McpOAuthCredentialStore
                 Persist(cache.ServerName, replacement, cancellationToken);
                 state.Active = replacement;
                 state.Revision++;
+                state.GrantEpoch++;
             }
             else
             {
@@ -219,6 +256,8 @@ internal sealed class McpOAuthCredentialStore
                 previous.Retired = true;
             state.PublishedCache = cache;
             cache.BaseRevision = state.Revision;
+            cache.GrantEpoch = state.GrantEpoch;
+            cache.Dirty = false;
             cache.Published = true;
         }
     }
@@ -284,6 +323,9 @@ internal sealed class McpOAuthCredentialStore
             Persist(serverName, replacement, cancellationToken);
             state.Active = replacement;
             state.Revision++;
+
+            // The rejected registration's connections must not write their tokens back.
+            state.GrantEpoch++;
             if (state.PublishedCache is { } published)
             {
                 published.Credentials = Clone(replacement);
@@ -312,11 +354,11 @@ internal sealed class McpOAuthCredentialStore
     }
 
     /// <summary>
-    /// Returns the tokens the SDK provider of <paramref name="cache"/> must use. Every cache
-    /// except an unpublished explicit authorization reads the active record when that record
-    /// changed after the cache last saw it. A refresh token is single-use at a rotating
-    /// provider: a replacement connection that initializes while the old connection rotates
-    /// the token would otherwise redeem the consumed one and fail with <c>invalid_grant</c>.
+    /// Returns the tokens the SDK provider of <paramref name="cache"/> must use. A cache that
+    /// follows the active record reads it again when it changed after the cache last saw it.
+    /// A refresh token is single-use at a rotating provider: a replacement connection that
+    /// initializes while the old connection rotates the token would otherwise redeem the
+    /// consumed one and fail with <c>invalid_grant</c>.
     /// </summary>
     internal TokenContainer? ReadTokens(McpOAuthTokenCache cache, CancellationToken cancellationToken)
     {
@@ -324,7 +366,7 @@ internal sealed class McpOAuthCredentialStore
         var state = GetState(cache.ServerName);
         lock (state.Sync)
         {
-            if (cache.BaseRevision != state.Revision && FollowsActiveRecord(cache, state.Active))
+            if (cache.BaseRevision != state.Revision && FollowsActiveRecord(cache, state))
             {
                 cache.Credentials = Clone(state.Active);
                 cache.BaseRevision = state.Revision;
@@ -344,51 +386,116 @@ internal sealed class McpOAuthCredentialStore
         cancellationToken.ThrowIfCancellationRequested();
         var state = GetState(cache.ServerName);
         lock (state.Sync)
+            StoreTokensLocked(cache, state, tokens, cancellationToken);
+    }
+
+    internal SemaphoreSlim GetRefreshGate(McpServerName serverName) => GetState(serverName).RefreshGate;
+
+    internal string? GetRedeemableRefreshToken(McpOAuthTokenCache cache)
+    {
+        var state = GetState(cache.ServerName);
+        lock (state.Sync)
+            return FollowsActiveRecord(cache, state) ? state.Active!.RefreshToken?.Value : null;
+    }
+
+    /// <summary>
+    /// Persists a refresh grant the token endpoint accepted. The token handler calls this
+    /// while it holds the refresh gate, so the next connection redeems the new refresh token.
+    /// The redeemed token is remembered as consumed: a late SDK store that carries it holds
+    /// an older grant and is ignored.
+    /// </summary>
+    internal void RecordRefreshGrant(
+        McpOAuthTokenCache cache,
+        string presentedRefreshToken,
+        McpOAuthIssuedTokens issued)
+    {
+        var state = GetState(cache.ServerName);
+        lock (state.Sync)
         {
-            var replacement = CreateReplacement(
-                tokens,
-                cache.Credentials,
-                cache.Identity,
-                cache.CanonicalResource,
-                cache.ProfileOwnsClientIdentity);
-
             if (cache.ExplicitAuthorization && !cache.Published)
-            {
-                // An authorization candidate stays local until the lifecycle gate publishes it.
-                ThrowIfRetired(cache);
-                cache.Credentials = replacement;
-                cache.Dirty = true;
                 return;
-            }
 
-            var currentWriter = !cache.Retired
-                                && (cache.Published
-                                    ? ReferenceEquals(state.PublishedCache, cache)
-                                    : cache.BaseRevision == state.Revision);
-            if (!currentWriter)
-                replacement = MergeStaleWrite(state.Active, replacement, tokens.RefreshToken is not null);
+            if (issued.RefreshToken is not null
+                && !string.Equals(issued.RefreshToken, presentedRefreshToken, StringComparison.Ordinal))
+                state.MarkConsumed(presentedRefreshToken);
 
-            Persist(cache.ServerName, replacement, cancellationToken);
-            state.Active = replacement;
-            state.Revision++;
-            cache.BaseRevision = state.Revision;
-            cache.Credentials = replacement;
-            cache.Dirty = false;
-            if (state.PublishedCache is { } published && !ReferenceEquals(published, cache))
+            var tokens = new TokenContainer
             {
-                published.Credentials = Clone(replacement);
-                published.BaseRevision = state.Revision;
+                AccessToken = issued.AccessToken,
+                RefreshToken = issued.RefreshToken,
+                ExpiresIn = issued.ExpiresIn,
+                TokenType = issued.TokenType,
+                Scope = issued.Scope,
+                ObtainedAt = _timeProvider.GetUtcNow(),
+                AuthorizationServer = cache.Credentials?.AuthorizationServer,
+                TokenEndpointAuthMethod = cache.Credentials?.TokenEndpointAuthMethod,
+            };
+            try
+            {
+                StoreTokensLocked(cache, state, tokens, CancellationToken.None);
+            }
+            catch (McpOAuthRetiredCredentialWriterException ex)
+            {
+                // The SDK stores the same tokens next and receives the same refusal.
+                _logger.LogDebug(ex,
+                    "Did not record a refresh grant of a retired OAuth connection for MCP server '{Name}'",
+                    cache.ServerName.Value);
             }
         }
     }
 
+    private void StoreTokensLocked(
+        McpOAuthTokenCache cache,
+        ServerCredentialState state,
+        TokenContainer tokens,
+        CancellationToken cancellationToken)
+    {
+        var replacement = CreateReplacement(
+            tokens,
+            cache.Credentials,
+            cache.Identity,
+            cache.CanonicalResource,
+            cache.ProfileOwnsClientIdentity);
+
+        if (cache.ExplicitAuthorization && !cache.Published)
+        {
+            // An authorization candidate stays local until the lifecycle gate publishes it.
+            ThrowIfRetired(cache);
+            cache.Credentials = replacement;
+            cache.Dirty = true;
+            return;
+        }
+
+        if (cache.GrantEpoch != state.GrantEpoch)
+        {
+            throw new McpOAuthRetiredCredentialWriterException(
+                "An OAuth connection from before the latest authorization attempted to replace its credentials.");
+        }
+
+        // A later grant already redeemed this refresh token, so these tokens are older than
+        // the active record.
+        if (state.IsConsumed(tokens.RefreshToken))
+            return;
+
+        var stale = cache.Retired
+                    || cache.BaseRevision != state.Revision
+                    || cache.Published && !ReferenceEquals(state.PublishedCache, cache);
+        if (stale)
+            replacement = MergeStaleWrite(state.Active, replacement, tokens.RefreshToken is not null);
+
+        Persist(cache.ServerName, replacement, cancellationToken);
+        state.Active = replacement;
+        state.Revision++;
+        cache.BaseRevision = state.Revision;
+        cache.Credentials = Clone(replacement);
+        cache.Dirty = false;
+    }
+
     /// <summary>
-    /// Merges tokens from a writer that is retired or that saw an older record. The SDK
-    /// stores tokens only after the token endpoint accepted a grant, so a new refresh token
-    /// in the write is the live one: the provider already consumed the token the writer
-    /// redeemed. The write keeps that refresh token, but it does not replace a newer access
-    /// token with an older one. A write for a different client registration or issuer is
-    /// refused, because an explicit authorization superseded that registration.
+    /// Merges tokens from a writer that is retired or that did not see the latest record.
+    /// The newer grant by <c>ObtainedAt</c> supplies both the access token and the refresh
+    /// token, so the record never pairs tokens of two grants. A write for a different client
+    /// registration or issuer is refused.
     /// </summary>
     private static McpOAuthTokenSet MergeStaleWrite(
         McpOAuthTokenSet? active,
@@ -401,28 +508,31 @@ internal sealed class McpOAuthCredentialStore
                 "A retired OAuth connection attempted to replace credentials of a different client registration.");
         }
 
-        McpOAuthTokenSet merged;
         if (replacement.ObtainedAt >= active.ObtainedAt)
         {
-            merged = replacement;
+            // A grant without rotation keeps the refresh token the provider still honours.
             if (!carriesNewRefreshToken)
-                merged.RefreshToken = active.RefreshToken;
-        }
-        else
-        {
-            merged = Clone(active)!;
-            if (carriesNewRefreshToken)
-                merged.RefreshToken = replacement.RefreshToken;
+                replacement.RefreshToken = active.RefreshToken;
+            return replacement;
         }
 
+        var merged = Clone(active)!;
+        if (merged.RefreshToken is null && carriesNewRefreshToken)
+            merged.RefreshToken = replacement.RefreshToken;
         return merged;
     }
 
-    private static bool FollowsActiveRecord(McpOAuthTokenCache cache, McpOAuthTokenSet? active)
+    /// <summary>
+    /// Whether <paramref name="cache"/> tracks the active record. An unpublished explicit
+    /// authorization keeps its own tokens. A cache from an older grant epoch or for another
+    /// client id never adopts the active tokens.
+    /// </summary>
+    private static bool FollowsActiveRecord(McpOAuthTokenCache cache, ServerCredentialState state)
         => !(cache.ExplicitAuthorization && !cache.Published)
-           && IsBound(active, cache.CanonicalResource)
+           && cache.GrantEpoch == state.GrantEpoch
+           && IsBound(state.Active, cache.CanonicalResource)
            && string.Equals(
-               active!.ClientId,
+               state.Active!.ClientId,
                cache.Credentials?.ClientId ?? cache.Identity?.ClientId,
                StringComparison.Ordinal);
 
@@ -731,12 +841,43 @@ internal sealed class McpOAuthCredentialStore
 
     private sealed class ServerCredentialState(McpOAuthTokenSet? active)
     {
+        /// <summary>
+        /// Bounds the consumed refresh token digests. Only grants that race each other need
+        /// them, so a short history is enough.
+        /// </summary>
+        private const int ConsumedHistory = 16;
+
+        private readonly Queue<string> _consumedOrder = new();
+        private readonly HashSet<string> _consumed = new(StringComparer.Ordinal);
+
         public object Sync { get; } = new();
 
         public McpOAuthTokenSet? Active { get; set; } = active;
 
         public int Revision { get; set; }
 
+        public int GrantEpoch { get; set; }
+
         public McpOAuthTokenCache? PublishedCache { get; set; }
+
+        public SemaphoreSlim RefreshGate { get; } = new(1, 1);
+
+        public void MarkConsumed(string refreshToken)
+        {
+            var digest = Digest(refreshToken);
+            if (!_consumed.Add(digest))
+                return;
+            _consumedOrder.Enqueue(digest);
+            if (_consumedOrder.Count > ConsumedHistory)
+                _consumed.Remove(_consumedOrder.Dequeue());
+        }
+
+        public bool IsConsumed(string? refreshToken)
+            => refreshToken is not null && _consumed.Contains(Digest(refreshToken));
+
+        // Keep digests, not the tokens, so this history holds no usable credential.
+        private static string Digest(string refreshToken)
+            => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(refreshToken)));
     }
 }
