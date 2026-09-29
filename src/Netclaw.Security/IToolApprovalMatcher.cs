@@ -926,7 +926,7 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
 
                 current.Append(string.Join(
                     ' ',
-                    ReconstructClauseWords(clause).SelectMany(DisplayWords).Select(word => NormalizeUnitWord(
+                    ReconstructClauseWords(clause).SelectMany(LegacyShellTextScan.Tokenize).Select(word => NormalizeUnitWord(
                         word,
                         result.WorkingDirectory,
                         Environment.PathStyle))));
@@ -1019,42 +1019,6 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
             yield return RedirectToken(redirect.Direction);
             yield return redirect.Target;
         }
-    }
-
-    /// <summary>
-    /// Splits one parser word into the display words of an approval unit, as
-    /// earlier releases stored them: quote marks go, and whitespace outside a
-    /// quoted run separates two words. This shapes display text only.
-    /// </summary>
-    private static IEnumerable<string> DisplayWords(string word)
-    {
-        var text = new StringBuilder(word.Length);
-        char? quote = null;
-        foreach (var character in word)
-        {
-            if (quote is null && character is '\'' or '"')
-            {
-                quote = character;
-            }
-            else if (quote == character)
-            {
-                quote = null;
-            }
-            else if (quote is null && char.IsWhiteSpace(character))
-            {
-                if (text.Length > 0)
-                    yield return text.ToString();
-
-                text.Clear();
-            }
-            else
-            {
-                text.Append(character);
-            }
-        }
-
-        if (text.Length > 0)
-            yield return text.ToString();
     }
 
     /// <summary>

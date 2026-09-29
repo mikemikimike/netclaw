@@ -9,7 +9,9 @@ namespace Netclaw.Security;
 
 /// <summary>
 /// The raw-text scan that feeds hard deny for unresolved input and the
-/// protected-path text heuristic. ShellSyntaxTree supplies every other shell fact.
+/// protected-path text heuristic. Approval units also use <see cref="Tokenize"/>
+/// to show one parser word without its quote marks. ShellSyntaxTree supplies
+/// every other shell fact.
 /// </summary>
 /// <remarks>
 /// This scan stays until the owner decides the deferred hard-deny differential
