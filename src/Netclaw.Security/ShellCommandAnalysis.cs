@@ -58,44 +58,60 @@ internal sealed class ShellCommandAnalyzer
     /// protected-path checks. The clauses never become approval candidates.
     /// </summary>
     /// <remarks>
-    /// ShellSyntaxTree 0.4.0-beta.5 rejects a background list, a Bash named
-    /// parameter without a proved variable state, and a PowerShell 7 chain
-    /// operator in Windows PowerShell 5.1. The screen parses each list element
-    /// alone and assumes a bounded initial state and the PowerShell 7 grammar.
-    /// Source that is still unparseable has no screen clauses and stays
-    /// exact-approval only.
+    /// ShellSyntaxTree 0.4.0-beta.5 rejects a background list, a dynamic
+    /// command word, a Bash named parameter without a proved variable state,
+    /// and a PowerShell 7 chain operator in Windows PowerShell 5.1. The screen
+    /// parses the source with an assumed bounded state and the PowerShell 7
+    /// grammar. When a Bash parse also fails, it parses each list element
+    /// alone. PowerShell keeps its source-authentic deny-only clauses and only
+    /// drops a final background operator. A list element that is still
+    /// unparseable adds no clause. So unparseable source stays exact-approval only.
     /// </remarks>
     private void CollectProhibitionScreenClauses(
         string command,
         string? workingDirectory,
         List<Clause> clauses)
     {
-        var elements = _environment.Grammar == ShellGrammar.Bash
-            ? SplitBackgroundList(command)
-            : [WithoutTrailingBackgroundOperator(command)];
-        foreach (var element in elements)
+        if (_environment.Grammar == ShellGrammar.PowerShell)
         {
-            foreach (var state in ProhibitionScreenStates)
-            {
-                var screened = new List<CommandOccurrence>();
-                var ignoredRegions = new HashSet<ClauseElement>(ReferenceEqualityComparer.Instance);
-                var ignoredProof = true;
-                _ = Analyze(
-                    element,
-                    workingDirectory,
-                    depth: 0,
-                    state,
-                    screened,
-                    clauses,
-                    ignoredRegions,
-                    ref ignoredProof);
-                if (screened.Count == 0)
-                    continue;
-
-                clauses.AddRange(screened.Select(static occurrence => occurrence.Clause));
-                break;
-            }
+            TryCollectScreenClauses(WithoutTrailingBackgroundOperator(command), workingDirectory, clauses);
+            return;
         }
+
+        if (TryCollectScreenClauses(command, workingDirectory, clauses))
+            return;
+
+        foreach (var element in SplitListElements(command))
+            TryCollectScreenClauses(element, workingDirectory, clauses);
+    }
+
+    private bool TryCollectScreenClauses(
+        string source,
+        string? workingDirectory,
+        List<Clause> clauses)
+    {
+        foreach (var state in ProhibitionScreenStates)
+        {
+            var screened = new List<CommandOccurrence>();
+            var ignoredRegions = new HashSet<ClauseElement>(ReferenceEqualityComparer.Instance);
+            var ignoredProof = true;
+            _ = Analyze(
+                source,
+                workingDirectory,
+                depth: 0,
+                state,
+                screened,
+                clauses,
+                ignoredRegions,
+                ref ignoredProof);
+            if (screened.Count == 0)
+                continue;
+
+            clauses.AddRange(screened.Select(static occurrence => occurrence.Clause));
+            return true;
+        }
+
+        return false;
     }
 
     private static readonly BashInitialStateMode[] ProhibitionScreenStates =
@@ -121,7 +137,7 @@ internal sealed class ShellCommandAnalyzer
         // parser exposes their concurrency and shell-state boundaries.
         if (_environment.Grammar == ShellGrammar.Bash
             && screenState is null
-            && FindBackgroundListOperators(command).Count > 0)
+            && FindListOperators(command).Any(static list => list.IsBackground))
             return ShellAnalysisFailure.Unresolved;
 
         ParsedCommand parsed;
@@ -378,27 +394,27 @@ internal sealed class ShellCommandAnalyzer
     }
 
     /// <summary>
-    /// Splits Bash source at each unquoted single <c>&amp;</c>. ShellSyntaxTree
-    /// 0.4.0-beta.5 has no background-list fact, so the hard-deny screen parses
-    /// each list element alone.
+    /// Splits Bash source at each unquoted list operator: <c>;</c>, <c>&amp;&amp;</c>,
+    /// <c>||</c>, and a background <c>&amp;</c>. Only the prohibition screen
+    /// uses the elements; they never become approval candidates.
     /// </summary>
-    private static IReadOnlyList<string> SplitBackgroundList(string command)
+    private static IReadOnlyList<string> SplitListElements(string command)
     {
         var elements = new List<string>();
         var start = 0;
-        foreach (var index in FindBackgroundListOperators(command))
+        foreach (var list in FindListOperators(command))
         {
-            elements.Add(command[start..index]);
-            start = index + 1;
+            elements.Add(command[start..list.Index]);
+            start = list.Index + list.Length;
         }
 
         elements.Add(command[start..]);
         return elements;
     }
 
-    private static List<int> FindBackgroundListOperators(string command)
+    private static List<(int Index, int Length, bool IsBackground)> FindListOperators(string command)
     {
-        var operators = new List<int>();
+        var operators = new List<(int Index, int Length, bool IsBackground)>();
         char? quote = null;
         var escaped = false;
 
@@ -427,15 +443,23 @@ internal sealed class ShellCommandAnalyzer
                 continue;
             }
 
-            if (quote is not null || ch != '&')
+            if (quote is not null)
                 continue;
 
-            var previous = i > 0 ? command[i - 1] : '\0';
             var next = i + 1 < command.Length ? command[i + 1] : '\0';
-            if (previous is '&' or '>' || next is '&' or '>')
-                continue;
-
-            operators.Add(i);
+            if (ch == ';')
+            {
+                operators.Add((i, 1, false));
+            }
+            else if (ch is '&' or '|' && next == ch)
+            {
+                operators.Add((i, 2, false));
+                i++;
+            }
+            else if (ch == '&' && (i == 0 || command[i - 1] != '>') && next != '>')
+            {
+                operators.Add((i, 1, true));
+            }
         }
 
         return operators;
