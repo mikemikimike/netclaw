@@ -4,7 +4,6 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Microsoft.Extensions.AI;
-using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
 using Xunit;
 
@@ -19,7 +18,7 @@ public sealed class StreamCommitGateTests
         new() { Role = ChatRole.Assistant, Contents = [new TextContent(text)] };
 
     [Fact]
-    public void Lifecycle_update_is_held_and_replaced_by_an_information_free_keepalive()
+    public void Lifecycle_update_is_held_and_replaced_by_a_bare_keepalive()
     {
         var gate = new StreamCommitGate();
         var created = Lifecycle("r1");
@@ -28,7 +27,7 @@ public sealed class StreamCommitGateTests
 
         var keepalive = Assert.Single(emitted);
         Assert.NotSame(created, keepalive);
-        Assert.True(ChatStreamUpdates.CarriesNoInformation(keepalive));
+        Assert.True(StreamCommitGate.IsPureKeepalive(keepalive));
         Assert.False(gate.Committed);
     }
 
@@ -60,6 +59,35 @@ public sealed class StreamCommitGateTests
         Assert.Equal([keepalive], gate.Accept(keepalive));
         var text = Text("x");
         Assert.Equal([text], gate.Accept(text)); // nothing was held ahead of it
+    }
+
+    [Fact]
+    public void Role_only_provider_keepalives_pass_through_and_are_never_held()
+    {
+        // The self-hosted client's prompt_progress / hidden-thinking heartbeat is a
+        // content-free update marked with the assistant role.
+        var gate = new StreamCommitGate();
+        var keepalive = new ChatResponseUpdate { Role = ChatRole.Assistant };
+
+        for (var i = 0; i < 5; i++)
+            Assert.Same(keepalive, Assert.Single(gate.Accept(keepalive)));
+
+        Assert.False(gate.Committed);
+        Assert.Empty(gate.Complete()); // nothing was held
+    }
+
+    [Fact]
+    public void IsPureKeepalive_ignores_role_but_not_ids_or_metadata()
+    {
+        Assert.True(StreamCommitGate.IsPureKeepalive(new ChatResponseUpdate()));
+        Assert.True(StreamCommitGate.IsPureKeepalive(new ChatResponseUpdate { Role = ChatRole.Assistant }));
+        Assert.False(StreamCommitGate.IsPureKeepalive(new ChatResponseUpdate { ResponseId = "resp_1" }));
+        Assert.False(StreamCommitGate.IsPureKeepalive(new ChatResponseUpdate { MessageId = "msg_1" }));
+        Assert.False(StreamCommitGate.IsPureKeepalive(new ChatResponseUpdate { RawRepresentation = new object() }));
+        Assert.False(StreamCommitGate.IsPureKeepalive(
+            new ChatResponseUpdate { AdditionalProperties = new AdditionalPropertiesDictionary { ["k"] = "v" } }));
+        Assert.False(StreamCommitGate.IsPureKeepalive(
+            new ChatResponseUpdate { Contents = [new UsageContent(new UsageDetails { InputTokenCount = 1 })] }));
     }
 
     [Fact]

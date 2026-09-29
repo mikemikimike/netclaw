@@ -3,7 +3,6 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
-using System.ClientModel;
 using System.Net;
 using System.Net.Sockets;
 
@@ -24,8 +23,7 @@ public sealed record RetryPolicy
     /// classified in this order:
     /// <list type="number">
     /// <item>An HTTP status carried by the outermost status-bearing exception
-    /// (<see cref="ProviderException"/>, the OpenAI SDK's
-    /// <see cref="ClientResultException"/>, or <see cref="HttpRequestException"/>) is
+    /// (<see cref="ProviderException"/> or <see cref="HttpRequestException"/>) is
     /// authoritative: 408/429/5xx retry, anything else does not, regardless of what
     /// transport exception sits underneath.</item>
     /// <item>Status-less <see cref="HttpRequestException"/>s (connection-level failures)
@@ -39,6 +37,14 @@ public sealed record RetryPolicy
     /// connection reset surfacing as a plain <see cref="IOException"/> mid-read) retries.</item>
     /// </list>
     /// Other <see cref="IOException"/>s are deliberately not treated as transient.
+    /// <para>
+    /// SDK result exceptions (e.g. System.ClientModel's <c>ClientResultException</c> from
+    /// the OpenAI SDK) are deliberately not recognized here. One that carries an HTTP
+    /// status is the end of the SDK pipeline's own retry loop (which already retried
+    /// 408/429/5xx, honoring <c>Retry-After</c>); retrying it again would multiply
+    /// requests and delay failover. One without a response wraps the transport exception
+    /// that caused it, which the rules above classify.
+    /// </para>
     /// Only <see cref="Exception.InnerException"/> is followed: the members of an
     /// <see cref="AggregateException"/> beyond its first inner exception are not inspected.
     /// </summary>
@@ -47,11 +53,10 @@ public sealed record RetryPolicy
         if (attempt >= MaxRetries)
             return false;
 
-        // Curated provider errors (e.g. the self-hosted OpenAI-compatible client) and SDK
-        // errors (ClientResultException) carry the HTTP status on the wrapper rather than
-        // on a raw HttpRequestException, possibly nested under other exceptions. The
-        // outermost status wins so that, e.g., a 400 wrapping a dropped connection is not
-        // retried.
+        // Curated provider errors (e.g. the self-hosted OpenAI-compatible client) carry
+        // the HTTP status on a ProviderException rather than a raw HttpRequestException,
+        // possibly nested under other exceptions. The outermost status wins so that,
+        // e.g., a 400 wrapping a dropped connection is not retried.
         if (FindStatus(ex) is { } status)
             return status.IsTransient;
 
@@ -80,9 +85,6 @@ public sealed record RetryPolicy
             {
                 case ProviderException { StatusCode: { } providerStatus }:
                     return new HttpStatus(IsTransientProviderStatus(providerStatus));
-                // Status 0 means the SDK never received a response (transport failure).
-                case ClientResultException { Status: > 0 } clientEx:
-                    return new HttpStatus(IsTransientProviderStatus(clientEx.Status));
                 case HttpRequestException { StatusCode: { } httpStatus }:
                     return new HttpStatus(httpStatus is
                         HttpStatusCode.RequestTimeout or

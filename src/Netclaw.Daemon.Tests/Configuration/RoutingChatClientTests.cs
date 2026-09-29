@@ -239,6 +239,28 @@ public sealed class RoutingChatClientTests
     }
 
     [Fact]
+    public async Task Streaming_NestedGates_PassRoleOnlyKeepalivesThroughOneForOne()
+    {
+        // Routing -> Retrying -> leaf, as composed in production. Role-only keepalives
+        // (self-hosted prompt_progress) must neither be held nor multiplied by the two
+        // commit gates: 5 keepalives + 1 text update upstream = 6 updates downstream.
+        var sink = new CapturingSink();
+        var leaf = new FakeChatClient(streamHandler: (_, _, ct) => KeepalivesThenTextAsync(5, ct));
+        var policy = new RetryPolicy { MaxRetries = 1, BaseDelay = TimeSpan.FromMilliseconds(1), MaxDelay = TimeSpan.FromMilliseconds(1) };
+        var primary = new RetryingChatClient(leaf, policy, NullLogger.Instance);
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in Client(sink, primary).GetStreamingResponseAsync(
+            [new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken))
+        {
+            updates.Add(u);
+        }
+
+        Assert.Equal(6, updates.Count);
+        Assert.Equal("done", Assert.Single(updates.ToChatResponse().Messages).Text);
+    }
+
+    [Fact]
     public async Task Streaming_DoesNotFailover_AfterPrimaryAlreadyYielded()
     {
         var sink = new CapturingSink();
@@ -348,6 +370,19 @@ public sealed class RoutingChatClientTests
             throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
 
         yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("unused")] };
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> KeepalivesThenTextAsync(
+        int keepalives, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        for (var i = 0; i < keepalives; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new ChatResponseUpdate { Role = ChatRole.Assistant };
+        }
+
+        yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("done")] };
     }
 
     private static async IAsyncEnumerable<ChatResponseUpdate> LifecycleThenResponseEndedAsync(

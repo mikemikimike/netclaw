@@ -34,7 +34,6 @@ public sealed class RetryPolicyTests
         { "HttpRequestException 503", () => new HttpRequestException("unavailable", null, HttpStatusCode.ServiceUnavailable) },
         { "ProviderException 502", () => new ProviderException("server error (502)", "HTTP 502", statusCode: 502) },
         { "ProviderException 429 nested", () => new InvalidOperationException("wrapped", new ProviderException("rate limited", "HTTP 429", statusCode: 429)) },
-        { "ClientResultException 503", () => new ClientResultException(new StubPipelineResponse(503)) },
 
         // Connection-level and timeout failures
         { "Status-less HttpRequestException", () => new HttpRequestException("connection refused") },
@@ -63,7 +62,11 @@ public sealed class RetryPolicyTests
         { "HttpRequestException 400", () => new HttpRequestException("bad request", null, HttpStatusCode.BadRequest) },
         { "HttpRequestException 401", () => new HttpRequestException("unauthorized", null, HttpStatusCode.Unauthorized) },
         { "ProviderException 400", () => new ProviderException("bad request", "HTTP 400", statusCode: 400) },
-        { "ClientResultException 400 over ResponseEnded (status wins)", () => new ClientResultException(new StubPipelineResponse(400), ResponseEnded()) },
+        // The SDK pipeline already retried these (honoring Retry-After); retrying again
+        // would multiply requests and delay failover.
+        { "ClientResultException 429 (SDK already retried)", () => new ClientResultException(new StubPipelineResponse(429)) },
+        { "ClientResultException 503 (SDK already retried)", () => new ClientResultException(new StubPipelineResponse(503)) },
+        { "ClientResultException 400", () => new ClientResultException(new StubPipelineResponse(400)) },
         { "ProviderException 400 over ResponseEnded (status wins)", () => new ProviderException("bad request", "HTTP 400", statusCode: 400, innerException: ResponseEnded()) },
         { "ProviderException 401 over a socket reset", () => new ProviderException("unauthorized", "HTTP 401", statusCode: 401, innerException: new IOException("read failed", ConnectionReset())) },
         { "HttpIOException InvalidResponse", () => new HttpIOException(HttpRequestError.InvalidResponse, "malformed chunked encoding") },

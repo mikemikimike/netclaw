@@ -18,6 +18,10 @@ public sealed class ChatStreamUpdatesTests
         { "finish reason only", () => new ChatResponseUpdate { FinishReason = ChatFinishReason.Stop }, true },
         { "unknown content", () => new ChatResponseUpdate { Contents = [new ErrorContent("refused")] }, true },
         { "empty text", () => new ChatResponseUpdate { Contents = [new TextContent("")] }, false },
+        // Hidden-reasoning deltas with nothing in them are heartbeats...
+        { "empty reasoning", () => new ChatResponseUpdate { Contents = [new TextReasoningContent("")] }, false },
+        // ...but a signature / redacted / encrypted reasoning block is real model output.
+        { "text-less reasoning with protected data", () => new ChatResponseUpdate { Contents = [new TextReasoningContent("") { ProtectedData = "sig" }] }, true },
         { "usage only", () => new ChatResponseUpdate { Contents = [new UsageContent(new UsageDetails { InputTokenCount = 5 })] }, false },
         {
             "response.created-style lifecycle update",
@@ -31,16 +35,5 @@ public sealed class ChatStreamUpdatesTests
     public void IsSubstantive(string name, Func<ChatResponseUpdate> makeUpdate, bool expected)
     {
         Assert.True(ChatStreamUpdates.IsSubstantive(makeUpdate()) == expected, $"case '{name}' expected {expected}");
-    }
-
-    [Fact]
-    public void CarriesNoInformation_OnlyForAnEmptyUpdate()
-    {
-        Assert.True(ChatStreamUpdates.CarriesNoInformation(new ChatResponseUpdate()));
-        Assert.False(ChatStreamUpdates.CarriesNoInformation(new ChatResponseUpdate { ResponseId = "resp_1" }));
-        Assert.False(ChatStreamUpdates.CarriesNoInformation(new ChatResponseUpdate { Role = ChatRole.Assistant }));
-        Assert.False(ChatStreamUpdates.CarriesNoInformation(new ChatResponseUpdate { RawRepresentation = new object() }));
-        Assert.False(ChatStreamUpdates.CarriesNoInformation(
-            new ChatResponseUpdate { AdditionalProperties = new AdditionalPropertiesDictionary { ["k"] = "v" } }));
     }
 }

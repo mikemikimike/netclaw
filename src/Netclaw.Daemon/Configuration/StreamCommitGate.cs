@@ -25,8 +25,9 @@ namespace Netclaw.Daemon.Configuration;
 /// </para>
 /// <para>
 /// So until the first substantive update (<see cref="ChatStreamUpdates.IsSubstantive"/>),
-/// an update carrying metadata is <b>held</b> and replaced downstream by an
-/// information-free keepalive; the session watchdog still sees liveness during a long
+/// an update carrying ids or metadata is <b>held</b> and replaced downstream by a
+/// bare keepalive, while a pure keepalive (see <see cref="IsPureKeepalive"/>) passes
+/// through as-is; the session watchdog still sees liveness during a long
 /// prefill, but nothing from a failed attempt reaches the final response. The first
 /// substantive update commits the stream and releases the held updates, in order,
 /// ahead of it. An attempt that fails before committing is simply discarded along with
@@ -59,13 +60,33 @@ internal sealed class StreamCommitGate
             return released;
         }
 
-        // Pure liveness (including another gate's keepalive): nothing to hold back.
-        if (ChatStreamUpdates.CarriesNoInformation(update))
+        // Pure liveness (a provider heartbeat, or another gate's keepalive): pass it
+        // through unchanged so keepalives are neither held nor multiplied.
+        if (IsPureKeepalive(update))
             return [update];
 
         _held.Add(update);
         return [new ChatResponseUpdate()];
     }
+
+    /// <summary>
+    /// True when the update carries no contents and no identifiers or metadata. A
+    /// <see cref="ChatResponseUpdate.Role"/> alone is ignored: providers mark heartbeats
+    /// with the assistant role (e.g. the self-hosted client's prompt_progress keepalive),
+    /// and a same-role update folds into the current message without changing it.
+    /// </summary>
+    internal static bool IsPureKeepalive(ChatResponseUpdate update) =>
+        update.Contents.Count == 0
+        && update.FinishReason is null
+        && update.AuthorName is null
+        && update.ResponseId is null
+        && update.MessageId is null
+        && update.ConversationId is null
+        && update.ModelId is null
+        && update.CreatedAt is null
+        && update.ContinuationToken is null
+        && update.RawRepresentation is null
+        && (update.AdditionalProperties is null || update.AdditionalProperties.Count == 0);
 
     /// <summary>
     /// Called when the attempt's stream ends cleanly; returns any held updates so a

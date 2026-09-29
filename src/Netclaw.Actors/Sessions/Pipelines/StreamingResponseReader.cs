@@ -168,18 +168,11 @@ internal static class StreamingResponseReader
     /// </summary>
     internal static StreamUpdateClassification Classify(ChatResponseUpdate update, bool anySubstantiveSeen)
     {
-        var hasSubstantive = IsSubstantiveUpdate(update);
+        // Shared with the retry/failover decorators, so "first real output" means the
+        // same thing for the watchdog and for when a stream can no longer be restarted.
+        var hasSubstantive = ChatStreamUpdates.IsSubstantive(update);
         return new StreamUpdateClassification(
             HasSubstantiveContent: hasSubstantive,
             IsFirstSubstantive: hasSubstantive && !anySubstantiveSeen);
     }
-
-    /// <summary>
-    /// True when an update represents real model progress. Delegates to
-    /// <see cref="ChatStreamUpdates.IsSubstantive"/>, the definition shared with the
-    /// retry/failover decorators, so "first real token" means the same thing for the
-    /// watchdog and for when a stream can no longer be restarted.
-    /// </summary>
-    internal static bool IsSubstantiveUpdate(ChatResponseUpdate update) =>
-        ChatStreamUpdates.IsSubstantive(update);
 }
