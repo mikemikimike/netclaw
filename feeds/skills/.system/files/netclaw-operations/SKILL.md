@@ -631,7 +631,9 @@ add to it. This applies to `AllowedTools`, `ReadFiles`/`WriteFiles`/`AttachFiles
   variable and a config file both set the same list. The error names the key.
 - A Public or Team `AllowedTools` list that exactly matches an older Netclaw default gets
   the current default, with a startup warning. `netclaw doctor --fix` writes the current
-  list after a backup. Any other list is applied as written.
+  list after a backup. Any other list is applied as written, which includes an edited older
+  list. If such a list lacks `file_search` or `tool_output_read`, add them by hand.
+  `netclaw doctor` warns when a Public or Team allowlist lacks `tool_output_read`.
 - The daemon reads `netclaw.json`, `secrets.json`, and `NETCLAW_*` variables.
   `netclaw doctor` reads only `netclaw.json`, so it can show a different list.
 

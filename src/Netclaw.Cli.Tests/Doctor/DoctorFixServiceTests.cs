@@ -455,6 +455,31 @@ public sealed class DoctorFixServiceTests
     }
 
     [Fact]
+    public async Task Existing_backup_is_kept_and_a_second_run_changes_nothing()
+    {
+        var paths = NewPaths();
+        var firstBackup = paths.NetclawConfigPath + ".legacy-tool-defaults.bak";
+        await File.WriteAllTextAsync(firstBackup, "older backup", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(paths.NetclawConfigPath, Netclaw0254ToolsConfig, TestContext.Current.CancellationToken);
+        var service = ConfigOnlyService(paths);
+
+        await service.ApplyAsync(
+            await service.BuildPlanAsync(TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+        var fixedText = await File.ReadAllTextAsync(paths.NetclawConfigPath, TestContext.Current.CancellationToken);
+        var secondPlan = await service.BuildPlanAsync(TestContext.Current.CancellationToken);
+        await service.ApplyAsync(secondPlan, TestContext.Current.CancellationToken);
+
+        Assert.Equal("older backup", await File.ReadAllTextAsync(firstBackup, TestContext.Current.CancellationToken));
+        Assert.Equal(
+            Netclaw0254ToolsConfig,
+            await File.ReadAllTextAsync(paths.NetclawConfigPath + ".legacy-tool-defaults.2.bak", TestContext.Current.CancellationToken));
+        Assert.DoesNotContain(secondPlan.Fixes, fix => fix.FilePath == paths.NetclawConfigPath);
+        Assert.Equal(fixedText, await File.ReadAllTextAsync(paths.NetclawConfigPath, TestContext.Current.CancellationToken));
+        Assert.False(File.Exists(paths.NetclawConfigPath + ".legacy-tool-defaults.3.bak"));
+    }
+
+    [Fact]
     public async Task Keeps_a_hand_edited_allowlist()
     {
         var paths = NewPaths();

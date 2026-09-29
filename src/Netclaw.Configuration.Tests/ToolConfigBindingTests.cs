@@ -247,6 +247,8 @@ public sealed class ToolConfigBindingTests : IDisposable
     [Theory]
     [InlineData("Bogus")]
     [InlineData("99")]
+    [InlineData("3")]
+    [InlineData("Pdf, Document")]
     public void Unknown_enum_item_fails_loudly(string category)
     {
         // The Microsoft binder drops an item that it cannot convert, which turned ["Bogus"] into [].
@@ -262,7 +264,24 @@ public sealed class ToolConfigBindingTests : IDisposable
             """));
 
         Assert.Contains("Tools.AudienceProfiles.Team.ChannelAttachments.AllowedCategories.1", ex.Message, StringComparison.Ordinal);
-        Assert.Contains($"'{category}'", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(category, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Enum_item_names_match_without_case()
+    {
+        var toolConfig = Bind(
+            """
+            {
+              "Tools": {
+                "AudienceProfiles": { "Team": { "ChannelAttachments": { "AllowedCategories": ["image", "PDF"] } } }
+              }
+            }
+            """);
+
+        Assert.Equal(
+            [AttachmentCategory.Image, AttachmentCategory.Pdf],
+            toolConfig.AudienceProfiles.Team.ChannelAttachments.AllowedCategories);
     }
 
     [Fact]
@@ -329,6 +348,20 @@ public sealed class ToolConfigBindingTests : IDisposable
             "extra" => [.. legacy, ToolAudienceProfileToolCatalog.SetWebhook],
             _ => [.. legacy, ToolAudienceProfileToolCatalog.FileRead]
         };
+
+        var toolConfig = Bind(AllowedToolsJson(TrustAudience.Team, configured), out var warnings);
+
+        Assert.Equal(configured, toolConfig.AudienceProfiles.Team.AllowedTools);
+        Assert.Empty(warnings);
+    }
+
+    [Fact]
+    public void Legacy_default_match_is_case_sensitive()
+    {
+        // Tool names are ordinal. "File_Read" is not the file_read tool, so the list is not an
+        // older default and the daemon must not replace it with the current default.
+        string[] configured = [.. ToolAudienceProfileToolCatalog.LegacyTeamDefaultAllowedTools[1]
+            .Select(tool => tool == ToolAudienceProfileToolCatalog.FileRead ? "File_Read" : tool)];
 
         var toolConfig = Bind(AllowedToolsJson(TrustAudience.Team, configured), out var warnings);
 
@@ -488,9 +521,10 @@ public sealed class ToolConfigBindingTests : IDisposable
         var configPath = Path.Combine(_dir.Path, "netclaw.json");
         File.WriteAllText(configPath, netclawJson);
 
-        // Same provider chain as the daemon: netclaw.json, secrets.json, then environment variables.
-        // Daemon.Tests covers the daemon chain itself. This copy lets a test use a unique
-        // environment prefix, so parallel tests do not share process environment variables.
+        // This chain has the same source order as AddNetclawDaemonSources: netclaw.json,
+        // secrets.json, then environment variables. DaemonToolConfigRegistrationTests pins the
+        // order of the real daemon chain. This copy uses a unique environment prefix, so
+        // parallel tests do not share process environment variables.
         var configuration = new ConfigurationBuilder()
             .AddJsonFile(configPath, optional: true, reloadOnChange: false)
             .AddJsonFile(Path.Combine(_dir.Path, "secrets.json"), optional: true, reloadOnChange: false)

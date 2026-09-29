@@ -82,6 +82,32 @@ public sealed class DaemonToolConfigRegistrationTests : IDisposable
     }
 
     [Fact]
+    public void Daemon_sources_apply_environment_then_secrets_then_netclaw_json()
+    {
+        // A later source wins: netclaw.json < secrets.json < NETCLAW_* variables. The unique key
+        // keeps this process-wide variable away from other tests.
+        var key = $"SourceOrder{Guid.NewGuid():N}";
+        var variable = $"NETCLAW_{key}__Value";
+        File.WriteAllText(_paths.NetclawConfigPath, $$"""{ "{{key}}": { "Value": "netclaw.json", "OnlyJson": "netclaw.json" } }""");
+        File.WriteAllText(_paths.SecretsPath, $$"""{ "{{key}}": { "Value": "secrets.json", "OnlySecrets": "secrets.json" } }""");
+        Environment.SetEnvironmentVariable(variable, "environment");
+        try
+        {
+            var withEnvironment = new ConfigurationBuilder().AddNetclawDaemonSources(_paths).Build();
+            Assert.Equal("environment", withEnvironment[$"{key}:Value"]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+
+        var withoutEnvironment = new ConfigurationBuilder().AddNetclawDaemonSources(_paths).Build();
+        Assert.Equal("secrets.json", withoutEnvironment[$"{key}:Value"]);
+        Assert.Equal("netclaw.json", withoutEnvironment[$"{key}:OnlyJson"]);
+        Assert.Equal("secrets.json", withoutEnvironment[$"{key}:OnlySecrets"]);
+    }
+
+    [Fact]
     public void Program_uses_the_daemon_configuration_sources_and_tool_config_registration()
     {
         // Program.cs is top-level statements, so no test can build the full daemon host.

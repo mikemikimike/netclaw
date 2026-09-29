@@ -206,6 +206,18 @@ public sealed class DoctorFixService
         return changed;
     }
 
+    // Returns netclaw.json.legacy-tool-defaults.bak, then .legacy-tool-defaults.2.bak, and so on:
+    // the first name that is not a file. A directory at a candidate name is not skipped, so the
+    // copy fails loudly instead of the fix writing without a backup.
+    internal static string NextLegacyAllowedToolsBackupPath(string configPath)
+    {
+        var candidate = configPath + ".legacy-tool-defaults.bak";
+        for (var number = 2; File.Exists(candidate); number++)
+            candidate = $"{configPath}.legacy-tool-defaults.{number}.bak";
+
+        return candidate;
+    }
+
     private static void TryApplySchemaFixes(JsonObject config, List<string> appliedFixes)
     {
         var version = EmbeddedSchemaLoader.CurrentSchemaVersion;
@@ -341,13 +353,12 @@ public sealed class DoctorFixService
             }
 
             // The audience tool list fix changes security policy data, so the operator gets a
-            // copy of the original file. A failed copy throws before the write below.
+            // copy of the original file. A failed copy throws before the write below. An older
+            // backup is never overwritten: each run that applies this fix writes a new file.
             if (fix.Description.Contains(LegacyAllowedToolsFixName, StringComparison.Ordinal)
                 && File.Exists(fix.FilePath))
             {
-                var backupPath = fix.FilePath + ".legacy-tool-defaults.bak";
-                if (!File.Exists(backupPath))
-                    File.Copy(fix.FilePath, backupPath);
+                File.Copy(fix.FilePath, NextLegacyAllowedToolsBackupPath(fix.FilePath), overwrite: false);
             }
 
             AtomicFile.WriteAllText(fix.FilePath, fix.UpdatedText);

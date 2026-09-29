@@ -605,6 +605,19 @@ public sealed class ToolAudienceProfilesDoctorCheckTests : IDisposable
         Assert.DoesNotContain("older Netclaw default list", result.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Allowlist_without_tool_output_read_is_an_advisory_warning()
+    {
+        WriteConfig(LegacyTeamConfig("\"file_read\", \"tool_output_read\""));
+
+        var result = await new ToolAudienceProfilesDoctorCheck(_paths).RunAsync(TestContext.Current.CancellationToken);
+
+        // Public has ["file_read"] only. Team has the tool, so doctor reports Public only.
+        Assert.Equal(DoctorSeverity.Warning, result.Severity);
+        Assert.Contains("Tools.AudienceProfiles.Public.AllowedTools does not include tool_output_read", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tools.AudienceProfiles.Team.AllowedTools does not include", result.Message, StringComparison.Ordinal);
+    }
+
     private static string LegacyTeamConfig(string teamTools)
         => $$"""
             {

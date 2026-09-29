@@ -205,7 +205,7 @@ shape, confirm that strict-default fallback is active, or verify that
     "AudienceProfiles": {
       "Public": {
         "ToolsMode": "Allowlist",
-        "AllowedTools": ["file_read", "file_list", "attach_file"],
+        "AllowedTools": ["file_read", "file_list", "file_search", "tool_output_read", "attach_file"],
         "McpServersMode": "Allowlist",
         "AllowedMcpServers": [],
         "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] },
@@ -215,7 +215,8 @@ shape, confirm that strict-default fallback is active, or verify that
       "Team": {
         "ToolsMode": "Allowlist",
         "AllowedTools": [
-          "file_read", "file_list", "file_write", "file_edit", "attach_file",
+          "file_read", "file_list", "file_search", "tool_output_read",
+          "file_write", "file_edit", "attach_file",
           "web_search", "web_fetch", "skill_manage", "set_reminder",
           "list_reminders", "cancel_reminder", "get_reminder_history",
           "set_working_directory"
@@ -242,7 +243,7 @@ shape, confirm that strict-default fallback is active, or verify that
 |-------|------|---------|-------------|
 | `ShellMode` | string? | `null` | Optional shell mode override (`Off`, `SandboxOnly`, `HostAllowed`). Falls back to security posture defaults when omitted. |
 | `MaxOutputChars` | int | `32000` | Maximum characters captured from tool output. |
-| `AudienceProfiles` | object | built-in defaults | Per-audience tool, MCP server, and filesystem permissions. Default tool grants are monotonic — `public` ⊆ `team` ⊆ `personal`. `public` gets read-only file tools only (`file_read`, `file_list`, `attach_file`) — no file mutation and no outbound web tools; `team` adds file mutation, web (`web_search`/`web_fetch`), scheduling, and skill tools but not `shell_execute`, webhook tools, or any MCP server; `personal` defaults to unrestricted interactive tool/file access and all MCP servers. `public` and `team` file operations remain bounded by configured trusted roots, including the shared Netclaw sessions root, until the operator opts in to broader roots. |
+| `AudienceProfiles` | object | built-in defaults | Per-audience tool, MCP server, and filesystem permissions. Default tool grants are monotonic — `public` ⊆ `team` ⊆ `personal`. `public` gets read-only file tools only (`file_read`, `file_list`, `file_search`, `tool_output_read`, `attach_file`) — no file mutation and no outbound web tools; `team` adds file mutation, web (`web_search`/`web_fetch`), scheduling, and skill tools but not `shell_execute`, webhook tools, or any MCP server; `personal` defaults to unrestricted interactive tool/file access and all MCP servers. `public` and `team` file operations remain bounded by configured trusted roots, including the shared Netclaw sessions root, until the operator opts in to broader roots. |
 
 List values in `Tools` replace the built-in default lists. They do not add to them.
 The daemon registration (`AddDaemonToolConfig`, which calls `ToolConfig.BindFromConfiguration`)
@@ -260,21 +261,28 @@ applies these rules:
   sets items for that key. If `netclaw.json` or `secrets.json` sets items, the daemon stops
   at startup with an error that names the key.
 - A scalar value for a list key stops daemon startup with an error that names the key.
-- An item that is not a valid value, for example `"AllowedCategories": ["Bogus"]`, stops
-  daemon startup with an error that names the item and its value.
+- An item that is not a valid value stops daemon startup with an error that names the item.
+  For example `"AllowedCategories": ["Bogus"]` or `["Pdf, Document"]`. Enum names match without case.
 
-Older installs: `netclaw init` 0.8.0 to 0.25.4 wrote the complete Public and Team default
-`AllowedTools` lists. Later releases added tools to those defaults, for example `file_search`
-and `tool_output_read` in 0.26.0. The old binder added the current defaults to the stored list,
-so those installs ran with the current defaults. To keep that behavior, the daemon applies
-this rule:
+Older installs: `netclaw init` 0.8.0 to 0.25.4 and 0.26.0-beta.1 to 0.26.0-beta.5 wrote the
+complete Public and Team default `AllowedTools` lists. Later releases changed those defaults,
+for example 0.26.0 added `file_search` and `tool_output_read`. The old binder added the current
+defaults to the stored list, so those installs ran with the current defaults. The daemon now
+applies these rules:
 
 - A Public or Team `AllowedTools` list that exactly matches an older shipped default (same
-  tools in any order, no extra, missing, or repeated tool) maps to the current default. The
-  daemon logs a startup warning that names the audience, the tool changes, and the fix.
-- A list that differs in any way is applied as written. The daemon never widens it.
-- `netclaw doctor` reports each such list. `netclaw doctor --fix` writes a backup to
-  `netclaw.json.legacy-tool-defaults.bak`, then writes the current default list.
+  tools in any order, no extra, missing, or repeated tool, same case) maps to the current
+  default. The daemon logs a startup warning that names the audience, the tool changes, and
+  the fix. For a 0.8.0 to 0.19.0 Public list, the current default removes `file_write`.
+- A list that differs in any way is applied as written. The daemon never widens it. This
+  includes an older default that the operator edited, for example with Web Access turned off
+  in the TUI, and the 17-tool list that the 0.24 TUI wrote when it changed a profile from
+  `All` to `Allowlist`. Such a list does not get `file_search` or `tool_output_read`.
+- `netclaw doctor` reports each exact older list. `netclaw doctor --fix` copies
+  `netclaw.json` to `netclaw.json.legacy-tool-defaults.bak` (or to the next free
+  `netclaw.json.legacy-tool-defaults.N.bak`), then writes the current default list.
+- `netclaw doctor` also warns, with no auto-fix, when a Public or Team allowlist does not
+  include `tool_output_read`. Spilled tool output tells the model to call that tool.
 - `ToolAudienceProfileToolCatalog.LegacyPublicDefaultAllowedTools` and
   `LegacyTeamDefaultAllowedTools` hold the older lists as policy data.
 

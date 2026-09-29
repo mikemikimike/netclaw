@@ -29,7 +29,7 @@ namespace Netclaw.Configuration;
 /// <item>JSON <c>null</c> or <c>{}</c>: the list becomes empty, and the binder returns a warning.</item>
 /// <item>A non-empty scalar value: binding fails.</item>
 /// <item>An empty or scalar value from one source and items from another source: binding fails.</item>
-/// <item>An item that cannot convert to the element type, or an undefined enum value: binding fails.</item>
+/// <item>An item that cannot convert to the element type, or an enum item that is not one defined name: binding fails.</item>
 /// </list>
 /// <para>
 /// The binder also replaces lists inside list items and inside dictionary values.
@@ -177,15 +177,18 @@ public static class ConfigurationListBinder
         var scalarType = Nullable.GetUnderlyingType(elementType) ?? elementType;
         if (scalarType.IsEnum)
         {
+            // An item must be one defined name. Enum.TryParse also accepts numbers and
+            // comma-separated names such as "Pdf, Document", which the schema rejects. Names
+            // compare without case, the same as the configuration binder and the CLI JSON reader.
+            var names = Enum.GetNames(scalarType);
             foreach (var item in items)
             {
                 if (item.Value is null
-                    || !Enum.TryParse(scalarType, item.Value, ignoreCase: true, out var parsed)
-                    || !Enum.IsDefined(scalarType, parsed!))
+                    || !names.Contains(item.Value, StringComparer.OrdinalIgnoreCase))
                 {
+                    // The value is not echoed, the same as the scalar-value error.
                     throw new InvalidOperationException(
-                        $"Configuration key '{DisplayPath(item)}' has the value '{item.Value}', "
-                        + $"which is not a valid {scalarType.Name}.");
+                        $"Configuration key '{DisplayPath(item)}' is not a valid {scalarType.Name} name.");
                 }
             }
         }
