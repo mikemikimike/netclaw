@@ -185,7 +185,7 @@ public sealed class McpCatalogRefreshTests
     }
 
     [Fact]
-    public async Task FailingRefresh_BacksOffExponentiallyAcrossReconnectionTicks()
+    public async Task FailingRefresh_BacksOffExponentiallyAtThirtySecondPolls()
     {
         // Issue #2261: a server that kept timing out was re-listed on every 30s tick.
         var runtime = new McpClientManagerLifecycleTests.ControlledMcpClientRuntime();
@@ -207,7 +207,7 @@ public sealed class McpCatalogRefreshTests
         firstPollAt = time.GetUtcNow();
         plan.ListFailure = new HttpRequestException("connection refused");
 
-        // Ten minutes of reconnection-service ticks.
+        // Ten minutes of polls at the reconnection service's 30s tick interval.
         var tick = McpReconnectionService.TickInterval;
         for (var elapsed = TimeSpan.Zero; elapsed < TimeSpan.FromMinutes(10); elapsed += tick)
         {
@@ -224,7 +224,64 @@ public sealed class McpCatalogRefreshTests
     }
 
     [Fact]
-    public async Task RepeatedRefreshFailures_ReportDegraded_AndSuccessRestoresHealthyCadence()
+    public async Task RepeatedRefreshFailures_ReportDegradedOnce_AndUnchangedRefreshRestoresHealthyCadence()
+    {
+        var runtime = new McpClientManagerLifecycleTests.ControlledMcpClientRuntime();
+        var plan = runtime.Enqueue(new McpClientManagerLifecycleTests.ClientPlan("tool_a"));
+        var time = new FakeTimeProvider(InitialTime);
+        await using var harness = CreateHarness(runtime, time);
+        await harness.Manager.StartAsync(TestContext.Current.CancellationToken);
+
+        time.Advance(McpClientManager.CatalogRefreshInterval);
+        plan.ListFailure = new HttpRequestException("connection refused");
+        const int threshold = McpClientManager.CatalogRefreshDegradedThreshold;
+        for (var failures = 1; failures <= threshold; failures++)
+        {
+            var status = harness.Manager.GetServerStatuses()[ServerName];
+            Assert.False(status.IsDegraded);
+            Assert.Equal("healthy", DaemonRuntimeStatusService.ToConnector(ServerName, status).Status);
+            await FailNextRefreshAsync(harness, plan, time, failures);
+        }
+
+        var degraded = harness.Manager.GetServerStatuses()[ServerName];
+        Assert.True(degraded.IsDegraded);
+        Assert.Equal(McpConnectionState.Connected, degraded.State);
+        Assert.Contains("connection refused", degraded.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
+        Assert.Equal("degraded", DaemonRuntimeStatusService.ToConnector(ServerName, degraded).Status);
+        // The cached tools stay published; the status only stops claiming health.
+        AssertPublishedTools(harness, "tool_a");
+
+        // Further failures keep it degraded without repeating the transition warning.
+        var lastFailureAt = time.GetUtcNow();
+        await FailNextRefreshAsync(harness, plan, time, threshold + 1);
+        Assert.Single(harness.Logger.Entries, entry => entry.Contains("reported degraded", StringComparison.Ordinal));
+
+        plan.ListFailure = null;
+        Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
+        Assert.Equal(threshold + 2, plan.RefreshCount);
+
+        var recovered = harness.Manager.GetServerStatuses()[ServerName];
+        Assert.False(recovered.IsDegraded);
+        Assert.Equal(0, recovered.ConsecutiveCatalogRefreshFailures);
+        Assert.Null(recovered.ErrorMessage);
+        // The last refresh failure stays the reported last error after recovery.
+        Assert.Equal(lastFailureAt, recovered.LastErrorAt);
+        Assert.Equal("healthy", DaemonRuntimeStatusService.ToConnector(ServerName, recovered).Status);
+        Assert.Contains(
+            harness.Logger.Entries,
+            entry => entry.Contains($"recovered after {threshold + 1} consecutive failure(s)", StringComparison.Ordinal));
+
+        // Backoff is cleared: the next poll waits the full healthy interval again.
+        time.Advance(TimeSpan.FromSeconds(30));
+        Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
+        Assert.Equal(threshold + 2, plan.RefreshCount);
+        time.Advance(McpClientManager.CatalogRefreshInterval);
+        Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
+        Assert.Equal(threshold + 3, plan.RefreshCount);
+    }
+
+    [Fact]
+    public async Task DegradedServer_RecoversWhenTheSuccessfulRefreshChangesTheCatalog()
     {
         var runtime = new McpClientManagerLifecycleTests.ControlledMcpClientRuntime();
         var plan = runtime.Enqueue(new McpClientManagerLifecycleTests.ClientPlan("tool_a"));
@@ -235,41 +292,72 @@ public sealed class McpCatalogRefreshTests
         time.Advance(McpClientManager.CatalogRefreshInterval);
         plan.ListFailure = new HttpRequestException("connection refused");
         for (var failures = 1; failures <= McpClientManager.CatalogRefreshDegradedThreshold; failures++)
-        {
-            var status = harness.Manager.GetServerStatuses()[ServerName];
-            Assert.False(status.IsCatalogRefreshDegraded);
-            Assert.Equal("healthy", DaemonRuntimeStatusService.ToConnector(ServerName, status).Status);
-
-            Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
-            Assert.Equal(failures, plan.RefreshCount);
-            time.Advance(TimeSpan.FromMilliseconds(McpClientManager.ComputeCatalogRefreshIntervalMs(failures)));
-        }
-
-        var degraded = harness.Manager.GetServerStatuses()[ServerName];
-        Assert.True(degraded.IsCatalogRefreshDegraded);
-        Assert.Equal(McpConnectionState.Connected, degraded.State);
-        Assert.Contains("connection refused", degraded.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
-        var connector = DaemonRuntimeStatusService.ToConnector(ServerName, degraded);
-        Assert.Equal("degraded", connector.Status);
-        // The cached tools stay published; the status only stops claiming health.
-        AssertPublishedTools(harness, "tool_a");
+            await FailNextRefreshAsync(harness, plan, time, failures);
+        Assert.True(harness.Manager.GetServerStatuses()[ServerName].IsDegraded);
 
         plan.ListFailure = null;
-        Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
-        Assert.Equal(McpClientManager.CatalogRefreshDegradedThreshold + 1, plan.RefreshCount);
+        plan.ToolNames = ["tool_a", "tool_b"];
+        Assert.True(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
 
         var recovered = harness.Manager.GetServerStatuses()[ServerName];
+        Assert.False(recovered.IsDegraded);
         Assert.Equal(0, recovered.ConsecutiveCatalogRefreshFailures);
-        Assert.Null(recovered.ErrorMessage);
         Assert.Equal("healthy", DaemonRuntimeStatusService.ToConnector(ServerName, recovered).Status);
+        Assert.Equal(2, harness.Manager.GetSnapshot(ServerName)?.Generation);
+        AssertPublishedTools(harness, "tool_a", "tool_b");
+    }
 
-        // Backoff is cleared: the next poll waits the full healthy interval again.
-        time.Advance(TimeSpan.FromSeconds(30));
-        Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
-        Assert.Equal(McpClientManager.CatalogRefreshDegradedThreshold + 1, plan.RefreshCount);
+    [Fact]
+    public async Task CallerCancelledRefresh_IsNotCountedAsAFailure()
+    {
+        var runtime = new McpClientManagerLifecycleTests.ControlledMcpClientRuntime();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var never = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var plan = runtime.Enqueue(new McpClientManagerLifecycleTests.ClientPlan("tool_a")
+        {
+            BeforeListTools = async (refreshCount, cancellationToken) =>
+            {
+                if (refreshCount != 1)
+                    return;
+                entered.TrySetResult();
+                await never.Task.WaitAsync(cancellationToken); // only the first attempt hangs
+            },
+        });
+        var time = new FakeTimeProvider(InitialTime);
+        await using var harness = CreateHarness(runtime, time);
+        await harness.Manager.StartAsync(TestContext.Current.CancellationToken);
+
         time.Advance(McpClientManager.CatalogRefreshInterval);
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var refresh = harness.Manager.TryRefreshCatalogAsync(ServerName, caller.Token);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await caller.CancelAsync();
+
+        Assert.False(await refresh);
+        var status = harness.Manager.GetServerStatuses()[ServerName];
+        Assert.Equal(0, status.ConsecutiveCatalogRefreshFailures);
+        Assert.Null(status.ErrorMessage);
+        Assert.DoesNotContain(harness.Logger.Entries, entry => entry.Contains("catalog refresh failed", StringComparison.Ordinal));
+
+        // The abandoned attempt released its poll slot, so the next poll re-lists at once.
         Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
-        Assert.Equal(McpClientManager.CatalogRefreshDegradedThreshold + 2, plan.RefreshCount);
+        Assert.Equal(2, plan.RefreshCount);
+    }
+
+    [Fact]
+    public void RefreshFailureOverlay_KeepsAnErrorAlreadyOnTheStatus()
+    {
+        var failedToolCallAt = InitialTime;
+        var status = new McpServerStatus(
+            ServerName, McpConnectionState.Connected, 1, "Tool call failed: HTTP 502", failedToolCallAt);
+        var health = new McpCatalogRefreshHealth(
+            McpClientManager.CatalogRefreshDegradedThreshold, "timed out after 15s", InitialTime.AddMinutes(2));
+
+        var overlaid = McpClientManager.WithCatalogRefreshHealth(status, health);
+
+        Assert.True(overlaid.IsDegraded);
+        Assert.Equal("Tool call failed: HTTP 502", overlaid.ErrorMessage);
+        Assert.Equal(InitialTime.AddMinutes(2), overlaid.LastErrorAt);
     }
 
     [Fact]
@@ -445,6 +533,18 @@ public sealed class McpCatalogRefreshTests
         Assert.DoesNotContain("netclaw mcp auth", status.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
         // The catalog stays visible so the operator sees which server needs the credential.
         AssertPublishedTools(harness, "tool_a");
+    }
+
+    private static async Task FailNextRefreshAsync(
+        McpClientManagerLifecycleTests.ManagerHarness harness,
+        McpClientManagerLifecycleTests.ClientPlan plan,
+        FakeTimeProvider time,
+        int expectedFailures)
+    {
+        Assert.False(await harness.Manager.TryRefreshCatalogAsync(ServerName, TestContext.Current.CancellationToken));
+        Assert.Equal(expectedFailures, harness.Manager.GetServerStatuses()[ServerName].ConsecutiveCatalogRefreshFailures);
+        Assert.Equal(expectedFailures, plan.RefreshCount); // each failure is a real re-list attempt
+        time.Advance(TimeSpan.FromMilliseconds(McpClientManager.ComputeCatalogRefreshIntervalMs(expectedFailures)));
     }
 
     private static void AssertPublishedTools(McpClientManagerLifecycleTests.ManagerHarness harness, params string[] expected)
