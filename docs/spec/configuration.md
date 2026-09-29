@@ -205,7 +205,7 @@ shape, confirm that strict-default fallback is active, or verify that
     "AudienceProfiles": {
       "Public": {
         "ToolsMode": "Allowlist",
-        "AllowedTools": ["file_read", "file_list", "attach_file"],
+        "AllowedTools": ["file_read", "file_list", "file_search", "tool_output_read", "attach_file"],
         "McpServersMode": "Allowlist",
         "AllowedMcpServers": [],
         "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] },
@@ -215,7 +215,8 @@ shape, confirm that strict-default fallback is active, or verify that
       "Team": {
         "ToolsMode": "Allowlist",
         "AllowedTools": [
-          "file_read", "file_list", "file_write", "file_edit", "attach_file",
+          "file_read", "file_list", "file_search", "tool_output_read",
+          "file_write", "file_edit", "attach_file",
           "web_search", "web_fetch", "skill_manage", "set_reminder",
           "list_reminders", "cancel_reminder", "get_reminder_history",
           "set_working_directory"
@@ -242,7 +243,30 @@ shape, confirm that strict-default fallback is active, or verify that
 |-------|------|---------|-------------|
 | `ShellMode` | string? | `null` | Optional shell mode override (`Off`, `SandboxOnly`, `HostAllowed`). Falls back to security posture defaults when omitted. |
 | `MaxOutputChars` | int | `32000` | Maximum characters captured from tool output. |
-| `AudienceProfiles` | object | built-in defaults | Per-audience tool, MCP server, and filesystem permissions. Default tool grants are monotonic — `public` ⊆ `team` ⊆ `personal`. `public` gets read-only file tools only (`file_read`, `file_list`, `attach_file`) — no file mutation and no outbound web tools; `team` adds file mutation, web (`web_search`/`web_fetch`), scheduling, and skill tools but not `shell_execute`, webhook tools, or any MCP server; `personal` defaults to unrestricted interactive tool/file access and all MCP servers. `public` and `team` file operations remain bounded by configured trusted roots, including the shared Netclaw sessions root, until the operator opts in to broader roots. |
+| `AudienceProfiles` | object | built-in defaults | Per-audience tool, MCP server, and filesystem permissions. Default tool grants are monotonic — `public` ⊆ `team` ⊆ `personal`. `public` gets read-only file tools only (`file_read`, `file_list`, `file_search`, `tool_output_read`, `attach_file`) — no file mutation and no outbound web tools; `team` adds file mutation, web (`web_search`/`web_fetch`), scheduling, and skill tools but not `shell_execute`, webhook tools, or any MCP server; `personal` defaults to unrestricted interactive tool/file access and all MCP servers. `public` and `team` file operations remain bounded by configured trusted roots, including the shared Netclaw sessions root, until the operator opts in to broader roots. |
+
+A list in `Tools` that has default items replaces its default list. It does not add to it.
+`ToolConfig.BindFromConfiguration` applies these rules to each such list (the
+`ToolConfig.DefaultedLists` table): `AllowedTools` for Public and Team,
+`ReadFiles`/`WriteFiles`/`AttachFiles` `Roots` for Public and Team,
+`ChannelAttachments.AllowedCategories` for all three audiences, `GlobalReadRoots`, and
+`WebFetch.HttpAllowList`.
+
+- An absent key keeps the default list.
+- Configured items replace the default list. For example,
+  `"Team": { "AllowedTools": ["file_read", "file_list"] }` grants Team only those two tools.
+  To add one entry, write the complete list, for example
+  `"GlobalReadRoots": ["{skills_dir}", "{identity_dir}", "{workspaces_dir}", "/srv/docs"]`.
+- `[]` or an empty `NETCLAW_*` variable gives an empty list.
+- JSON `null` or `{}` gives an empty list, and the daemon logs a startup warning that names
+  the key. These lists are all allow lists, so an empty list grants less.
+- These shapes stop daemon startup with an error that names the key, and they do not print
+  the value: a scalar value; an empty `NETCLAW_*` variable when `netclaw.json` or
+  `secrets.json` sets items for the same key; an attachment category that is not one defined
+  name (for example `"Bogus"`, `"3"`, or `"Pdf, Document"`). Category names match without case.
+
+The daemon reads `netclaw.json`, then `secrets.json`, then `NETCLAW_*` variables. A later
+source wins. `netclaw doctor` reads only `netclaw.json`.
 
 ### MCP Servers
 
