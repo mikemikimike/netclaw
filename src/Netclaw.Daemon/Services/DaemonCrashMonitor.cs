@@ -20,13 +20,13 @@ internal sealed class DaemonCrashMonitor : IDisposable
     // Passed in at construction so the array is fully published before the
     // TaskScheduler.UnobservedTaskException handler subscribes below — no
     // memory-model race with the finalizer thread.
-    private readonly Func<Exception, bool>[] _benignUnobservedFilters;
+    private readonly BenignUnobservedExceptionFilter[] _benignUnobservedFilters;
     private IServiceProvider? _services;
 
     private DaemonCrashMonitor(
         string logsDirectory,
         TimeProvider? timeProvider,
-        Func<Exception, bool>[] benignUnobservedFilters)
+        BenignUnobservedExceptionFilter[] benignUnobservedFilters)
     {
         _logsDirectory = logsDirectory;
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -42,7 +42,7 @@ internal sealed class DaemonCrashMonitor : IDisposable
     public static DaemonCrashMonitor Register(
         NetclawPaths paths,
         TimeProvider? timeProvider = null,
-        IReadOnlyList<Func<Exception, bool>>? benignUnobservedFilters = null)
+        IReadOnlyList<BenignUnobservedExceptionFilter>? benignUnobservedFilters = null)
         => new(
             paths.LogsDirectory,
             timeProvider,
@@ -79,10 +79,11 @@ internal sealed class DaemonCrashMonitor : IDisposable
 
     private void HandleUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs args)
     {
-        if (IsBenignUnobservedException(args.Exception))
+        var benignFilter = FindBenignUnobservedFilter(args.Exception);
+        if (benignFilter is not null)
         {
             TryLogMonitorFailure(
-                "Observed a known-benign unobserved task exception; skipping crash report.",
+                $"Observed a known-benign unobserved task exception; skipping crash report. {benignFilter.Description}",
                 args.Exception);
             args.SetObserved();
             return;
@@ -92,14 +93,14 @@ internal sealed class DaemonCrashMonitor : IDisposable
         args.SetObserved();
     }
 
-    private bool IsBenignUnobservedException(Exception exception)
+    private BenignUnobservedExceptionFilter? FindBenignUnobservedFilter(Exception exception)
     {
         foreach (var filter in _benignUnobservedFilters)
         {
             try
             {
-                if (filter(exception))
-                    return true;
+                if (filter.Matches(exception))
+                    return filter;
             }
             catch (Exception filterFailure)
             {
@@ -107,7 +108,7 @@ internal sealed class DaemonCrashMonitor : IDisposable
             }
         }
 
-        return false;
+        return null;
     }
 
     private void HandleCrash(string reason, Exception exception, bool isTerminating, bool isUnobservedTask)
