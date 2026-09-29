@@ -186,6 +186,36 @@ public sealed class RoutingChatClientTests
     }
 
     [Fact]
+    public async Task Streaming_FailsOver_WhenPrimaryRetriesExhaustOnResponseEnded()
+    {
+        // #2262: in the composed pipeline the primary's retry decorator retries a
+        // pre-first-chunk ResponseEnded; once its budget is spent the routing client
+        // must fall over to the fallback instead of failing the turn.
+        var sink = new CapturingSink();
+        var primaryAttempts = 0;
+        var primaryInner = new FakeChatClient(streamHandler: (_, _, ct) =>
+        {
+            primaryAttempts++;
+            return ThrowResponseEndedBeforeFirstChunkAsync(true, ct);
+        });
+        var policy = new RetryPolicy
+        {
+            MaxRetries = 2,
+            BaseDelay = TimeSpan.FromMilliseconds(1),
+            MaxDelay = TimeSpan.FromMilliseconds(1)
+        };
+        var primary = new RetryingChatClient(primaryInner, policy, NullLogger.Instance);
+        var fallback = new FakeChatClient(streamHandler: (_, _, ct) => SingleTextUpdateAsync("fallback", ct));
+
+        var texts = await CollectText(Client(sink, primary, fallback));
+
+        Assert.Equal(["fallback"], texts);
+        Assert.Equal(3, primaryAttempts); // 1 initial + 2 retries before failing over
+        Assert.Contains(sink.Alerts, a => a.Category == AlertType.ProviderFailover);
+        Assert.DoesNotContain(sink.Alerts, a => a.Category == AlertType.ProviderUnreachable);
+    }
+
+    [Fact]
     public async Task Streaming_DoesNotFailover_AfterPrimaryAlreadyYielded()
     {
         var sink = new CapturingSink();
@@ -282,6 +312,17 @@ public sealed class RoutingChatClientTests
         cancellationToken.ThrowIfCancellationRequested();
         if (shouldThrow)
             throw new HttpRequestException("primary stream failed before first chunk");
+
+        yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("unused")] };
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> ThrowResponseEndedBeforeFirstChunkAsync(
+        bool shouldThrow, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (shouldThrow)
+            throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
 
         yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("unused")] };
     }

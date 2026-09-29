@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Net;
+using System.Net.Sockets;
 
 namespace Netclaw.Configuration;
 
@@ -20,8 +21,12 @@ public sealed record RetryPolicy
     /// Determines whether the given exception is transient and should be retried.
     /// Retries on: status-less network failures, 408/429/5xx responses (whether they
     /// surface as a raw <see cref="HttpRequestException"/> or are curated into a
-    /// <see cref="ProviderException"/> by a provider transport layer), and
-    /// timeout-style cancellations.
+    /// <see cref="ProviderException"/> by a provider transport layer), transport-level
+    /// stream truncation (<see cref="HttpIOException"/> with
+    /// <see cref="HttpRequestError.ResponseEnded"/> or
+    /// <see cref="HttpRequestError.ConnectionError"/>, or a socket failure surfacing as an
+    /// I/O error mid-read), and timeout-style cancellations. Other
+    /// <see cref="IOException"/>s are deliberately not treated as transient.
     /// </summary>
     public bool ShouldRetry(Exception ex, int attempt)
     {
@@ -33,6 +38,20 @@ public sealed record RetryPolicy
         // and it may be nested under an inner exception. Without this, the retry layer
         // would miss the provider 429/5xx it most needs to retry.
         if (FindInner<ProviderException>(ex) is { StatusCode: 408 or 429 or (>= 500 and <= 599) })
+            return true;
+
+        // A streaming response cut off by the network (e.g. "The response ended
+        // prematurely. (ResponseEnded)") surfaces as HttpIOException while reading the
+        // body, not as an HttpRequestException, and SDK clients (e.g. System.ClientModel's
+        // ClientResultException) may wrap it. InvalidResponse / UserAuthenticationError /
+        // other codes describe a malformed or rejected exchange, so they stay non-transient.
+        if (FindInner<HttpIOException>(ex) is
+            { HttpRequestError: HttpRequestError.ResponseEnded or HttpRequestError.ConnectionError })
+            return true;
+
+        // A connection reset mid-body can surface as an IOException wrapping the
+        // SocketException rather than as an HttpIOException.
+        if (ex is IOException && FindInner<SocketException>(ex) is not null)
             return true;
 
         return ex switch

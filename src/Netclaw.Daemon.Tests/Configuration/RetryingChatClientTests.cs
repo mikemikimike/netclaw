@@ -255,6 +255,81 @@ public sealed class RetryingChatClientTests
         Assert.Equal(3, attempts); // 2 ProviderException(502) failures + 1 success
     }
 
+    [Fact]
+    public async Task StreamingRetries_ResponseEndedBeforeFirstChunk_ThenSucceeds()
+    {
+        // #2262: a dropped stream surfaces as HttpIOException(ResponseEnded) while reading
+        // the body. Before the first chunk nothing has been emitted, so it must be retried
+        // rather than failing the turn.
+        var attempts = 0;
+        var fake = new FakeChatClient(streamHandler: (_, _, ct) =>
+        {
+            attempts++;
+            return ThrowResponseEndedThenYield(attempts, failUntil: 2, ct);
+        });
+        var client = new RetryingChatClient(fake, _policy, NullLogger.Instance);
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in client.GetStreamingResponseAsync(
+            [new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken))
+        {
+            updates.Add(u);
+        }
+
+        var update = Assert.Single(updates);
+        Assert.Equal("ok", update.Text);
+        Assert.Equal(2, attempts); // 1 ResponseEnded failure + 1 success
+    }
+
+    [Fact]
+    public async Task StreamingDoesNotRetry_ResponseEndedAfterFirstChunk()
+    {
+        // Mid-stream truncation is out of scope for the retry decorator: restarting would
+        // duplicate the chunk already emitted downstream.
+        var attempts = 0;
+        var fake = new FakeChatClient(streamHandler: (_, _, ct) =>
+        {
+            attempts++;
+            return YieldThenThrowResponseEnded(ct);
+        });
+        var client = new RetryingChatClient(fake, _policy, NullLogger.Instance);
+
+        var updates = new List<ChatResponseUpdate>();
+        var ex = await Assert.ThrowsAsync<HttpIOException>(async () =>
+        {
+            await foreach (var u in client.GetStreamingResponseAsync(
+                [new ChatMessage(ChatRole.User, "hi")], cancellationToken: TestContext.Current.CancellationToken))
+            {
+                updates.Add(u);
+            }
+        });
+
+        Assert.Equal(HttpRequestError.ResponseEnded, ex.HttpRequestError);
+        Assert.Single(updates);
+        Assert.Equal(1, attempts);
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> ThrowResponseEndedThenYield(
+        int attemptNumber, int failUntil,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (attemptNumber < failUntil)
+            throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
+
+        yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("ok")] };
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> YieldThenThrowResponseEnded(
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        cancellationToken.ThrowIfCancellationRequested();
+        yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = [new TextContent("partial")] };
+        throw new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely. (ResponseEnded)");
+    }
+
     // Throws a retryable 429 before yielding any chunk while attemptNumber < failUntil,
     // otherwise yields one chunk. The runtime-dependent condition keeps the yield
     // reachable (no CS0162) so no warning suppression is needed.
