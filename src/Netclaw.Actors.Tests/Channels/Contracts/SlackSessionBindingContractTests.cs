@@ -681,9 +681,18 @@ public sealed class SlackSessionBindingContractTests(ITestOutputHelper output)
 
     protected override async Task AfterAllAsync()
     {
-        await base.AfterAllAsync();
-        foreach (var dir in _testTempDirs)
-            await dir.DisposeAsync();
-        _testTempDirs.Clear();
+        try
+        {
+            await base.AfterAllAsync();
+        }
+        finally
+        {
+            // Base teardown can throw (actor-system shutdown). Run temp cleanup
+            // in finally so a failed teardown does not recreate the /tmp leak
+            // (issue #2266).
+            foreach (var dir in _testTempDirs)
+                await dir.DisposeAsync();
+            _testTempDirs.Clear();
+        }
     }
 }

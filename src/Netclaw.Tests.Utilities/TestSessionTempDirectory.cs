@@ -30,11 +30,16 @@ public sealed class TestSessionTempDirectory : IAsyncDisposable
     /// <summary>
     /// Creates a <see cref="NetclawPaths"/> rooted at a unique temp directory,
     /// with the directory tree owned (and later deleted) by this helper.
+    /// <paramref name="prefix"/> must be a single safe file-name segment (no
+    /// path separators, not rooted, no traversal) so the owned tree always
+    /// stays under <see cref="Path.GetTempPath()"/>.
     /// </summary>
     public static TestSessionTempDirectory Create(
         string prefix = "netclaw-test-",
         bool createDirectoryTree = false)
     {
+        ValidatePrefix(prefix);
+
         var basePath = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(),
             $"{prefix}{Guid.NewGuid():N}");
@@ -44,6 +49,23 @@ public sealed class TestSessionTempDirectory : IAsyncDisposable
             paths.EnsureDirectoriesExist();
 
         return new TestSessionTempDirectory(paths);
+    }
+
+    private static void ValidatePrefix(string prefix)
+    {
+        if (string.IsNullOrEmpty(prefix))
+            throw new ArgumentException("A non-empty prefix is required.", nameof(prefix));
+
+        var leaf = System.IO.Path.GetFileName(prefix);
+        if (!string.Equals(leaf, prefix, StringComparison.Ordinal)
+            || System.IO.Path.IsPathRooted(prefix)
+            || prefix.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0
+            || prefix.Contains("..", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The prefix must be a single file-name segment (no separators, root, traversal, or invalid name chars).",
+                nameof(prefix));
+        }
     }
 
     /// <summary>

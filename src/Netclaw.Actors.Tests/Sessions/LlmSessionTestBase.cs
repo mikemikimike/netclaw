@@ -131,8 +131,17 @@ public abstract class LlmSessionTestBase : TestKit
 
     protected override async Task AfterAllAsync()
     {
-        await base.AfterAllAsync();
-        if (_testTempDir is not null)
-            await _testTempDir.DisposeAsync();
+        try
+        {
+            await base.AfterAllAsync();
+        }
+        finally
+        {
+            // Base teardown can throw (actor-system / host shutdown). Run temp
+            // cleanup in finally so a failed teardown does not recreate the
+            // /tmp leak (issue #2266).
+            if (_testTempDir is not null)
+                await _testTempDir.DisposeAsync();
+        }
     }
 }
