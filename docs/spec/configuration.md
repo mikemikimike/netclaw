@@ -265,6 +265,10 @@ A list in `Tools` that has default items replaces its default list. It does not 
   `secrets.json` sets items for the same key; an attachment category that is not one defined
   name (for example `"Bogus"`, `"3"`, or `"Pdf, Document"`). Category names match without case.
 
+`netclaw doctor` warns, with no auto-fix, when a Public or Team allowlist does not include
+`tool_output_read`. A large tool result spills to a file, and the notice tells the model to
+call that tool.
+
 The daemon reads `netclaw.json`, then `secrets.json`, then `NETCLAW_*` variables. A later
 source wins for each key. `netclaw doctor` reads only `netclaw.json`.
 

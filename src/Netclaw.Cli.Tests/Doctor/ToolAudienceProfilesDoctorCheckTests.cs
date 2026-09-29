@@ -575,6 +575,32 @@ public sealed class ToolAudienceProfilesDoctorCheckTests : IDisposable
         Assert.Contains("approval default on Personal", result.Message);
     }
 
+    [Theory]
+    [InlineData("\"file_read\"", true)]
+    [InlineData("\"file_read\", \"tool_output_read\"", false)]
+    public async Task Allowlist_without_tool_output_read_is_an_advisory_warning(string publicTools, bool warns)
+    {
+        WriteConfig(
+            $$"""
+            {
+              "configVersion": 1,
+              "Tools": {
+                "AudienceProfiles": {
+                  "Public": { "ToolsMode": "Allowlist", "AllowedTools": [{{publicTools}}] },
+                  "Team": { "ToolsMode": "Allowlist", "AllowedTools": ["file_read", "tool_output_read"] },
+                  "Personal": { "ToolsMode": "All", "McpServersMode": "All" }
+                }
+              }
+            }
+            """);
+
+        var result = await new ToolAudienceProfilesDoctorCheck(_paths).RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(warns, result.Message.Contains(
+            "Tools.AudienceProfiles.Public.AllowedTools does not include tool_output_read", StringComparison.Ordinal));
+        Assert.DoesNotContain("Tools.AudienceProfiles.Team.AllowedTools does not include", result.Message, StringComparison.Ordinal);
+    }
+
     private void WriteConfig(object config)
     {
         File.WriteAllText(
