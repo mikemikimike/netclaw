@@ -26,6 +26,7 @@ public sealed class SlackSessionBindingContractTests(ITestOutputHelper output)
 {
     private RecordingSlackReplyClient _replyClient = new();
     private int _actorCounter;
+    private readonly List<Netclaw.Tests.Utilities.TestSessionTempDirectory> _testTempDirs = [];
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
@@ -147,7 +148,9 @@ public sealed class SlackSessionBindingContractTests(ITestOutputHelper output)
         IThreadHistoryFetcher? historyFetcher = null,
         IChannelRegistry? channelRegistry = null)
     {
-        var paths = TestSlackGatewayDeps.NewTestPaths();
+        var testTemp = TestSlackGatewayDeps.NewTestPaths();
+        _testTempDirs.Add(testTemp);
+        var paths = testTemp.Paths;
         var deps = new SlackGatewayDependencies(
             Pipeline: pipeline,
             IngressGate: null,
@@ -676,4 +679,11 @@ public sealed class SlackSessionBindingContractTests(ITestOutputHelper output)
         }
     }
 
+    protected override async Task AfterAllAsync()
+    {
+        await base.AfterAllAsync();
+        foreach (var dir in _testTempDirs)
+            await dir.DisposeAsync();
+        _testTempDirs.Clear();
+    }
 }
