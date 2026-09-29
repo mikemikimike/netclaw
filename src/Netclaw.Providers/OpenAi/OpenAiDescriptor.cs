@@ -26,8 +26,9 @@ public sealed class OpenAiDescriptor : IProviderDescriptor
     // The Codex backend gates model catalog entries by Codex CLI client version:
     // a stale value silently hides newer models from discovery (#1831, #2259).
     // This must track the official @openai/codex release, not Netclaw's version.
-    // To refresh: use the latest stable (non-alpha) rust-v* tag from
-    // `gh release list -R openai/codex`.
+    // To refresh: use `npm view @openai/codex dist-tags.latest` (or the rust-v* release
+    // marked "Latest" in `gh release list -R openai/codex`). Plain MAJOR.MINOR.PATCH only:
+    // the real CLI strips pre-release suffixes before sending client_version.
     internal const string CodexModelCatalogClientVersion = "0.159.0";
 
     private readonly HttpClient _httpClient;
