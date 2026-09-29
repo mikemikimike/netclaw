@@ -152,20 +152,8 @@ internal sealed class McpOAuthClientRegistrar(
             dynamicClientRegistration: true);
     }
 
-    /// <summary>
-    /// Returns the authorization server identifier that <paramref name="endpoint"/> advertises
-    /// in its protected-resource metadata, exactly as published. The SDK compares this string
-    /// ordinally with the issuer stored beside the tokens before it redeems a refresh token.
-    /// Returns <c>null</c> when the server publishes no protected-resource metadata.
-    /// </summary>
-    public Task<string?> TryDiscoverAdvertisedAuthorizationServerAsync(
-        string endpoint,
-        CancellationToken cancellationToken)
-        => TryReadAdvertisedAuthorizationServerAsync(new Uri(endpoint), cancellationToken);
-
-    private async Task<string?> TryReadAdvertisedAuthorizationServerAsync(
-        Uri resource,
-        CancellationToken cancellationToken)
+    private async Task<(string Issuer, string? RegistrationEndpoint, IReadOnlyList<string> AuthMethods)?>
+        TryDiscoverAuthorizationServerAsync(Uri resource, CancellationToken cancellationToken)
     {
         var origin = resource.GetLeftPart(UriPartial.Authority);
         var path = resource.AbsolutePath.TrimEnd('/');
@@ -180,41 +168,33 @@ internal sealed class McpOAuthClientRegistrar(
         foreach (var candidate in candidates)
         {
             var issuer = await TryReadAuthorizationServerAsync(candidate, cancellationToken);
-            if (issuer is not null)
-                return issuer;
+            if (issuer is null)
+                continue;
+
+            var metadataUrl = $"{issuer.TrimEnd('/')}/.well-known/oauth-authorization-server";
+            JsonElement metadata;
+            try
+            {
+                metadata = await httpClient.GetFromJsonAsync<JsonElement>(metadataUrl, cancellationToken);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException)
+            {
+                throw new McpOAuthRegistrationException(
+                    $"Authorization server '{issuer}' did not return usable metadata at {metadataUrl}.", ex);
+            }
+
+            var registrationEndpoint = metadata.TryGetProperty("registration_endpoint", out var registration)
+                ? registration.GetString()
+                : null;
+            var authMethods = metadata.TryGetProperty("token_endpoint_auth_methods_supported", out var methods)
+                                  && methods.ValueKind == JsonValueKind.Array
+                ? methods.EnumerateArray().Select(m => m.GetString()).OfType<string>().ToArray()
+                : [];
+
+            return (issuer, registrationEndpoint, authMethods);
         }
 
         return null;
-    }
-
-    private async Task<(string Issuer, string? RegistrationEndpoint, IReadOnlyList<string> AuthMethods)?>
-        TryDiscoverAuthorizationServerAsync(Uri resource, CancellationToken cancellationToken)
-    {
-        var issuer = await TryReadAdvertisedAuthorizationServerAsync(resource, cancellationToken);
-        if (issuer is null)
-            return null;
-
-        var metadataUrl = $"{issuer.TrimEnd('/')}/.well-known/oauth-authorization-server";
-        JsonElement metadata;
-        try
-        {
-            metadata = await httpClient.GetFromJsonAsync<JsonElement>(metadataUrl, cancellationToken);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException)
-        {
-            throw new McpOAuthRegistrationException(
-                $"Authorization server '{issuer}' did not return usable metadata at {metadataUrl}.", ex);
-        }
-
-        var registrationEndpoint = metadata.TryGetProperty("registration_endpoint", out var registration)
-            ? registration.GetString()
-            : null;
-        var authMethods = metadata.TryGetProperty("token_endpoint_auth_methods_supported", out var methods)
-                              && methods.ValueKind == JsonValueKind.Array
-            ? methods.EnumerateArray().Select(m => m.GetString()).OfType<string>().ToArray()
-            : [];
-
-        return (issuer, registrationEndpoint, authMethods);
     }
 
     private async Task<string?> TryReadAuthorizationServerAsync(string url, CancellationToken cancellationToken)

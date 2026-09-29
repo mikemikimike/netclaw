@@ -22,12 +22,17 @@ internal static class McpHttpClientFactory
     /// The process owns its lifetime so one short-lived transport cannot close
     /// the connection pool while another transport is using it.
     /// </summary>
-    public static HttpClient Shared { get; } = Create(new SocketsHttpHandler
+    public static HttpClient Shared { get; } = Create(CreatePrimaryHandler());
+
+    /// <summary>
+    /// Creates the socket handler for an MCP connection pool.
+    /// </summary>
+    internal static SocketsHttpHandler CreatePrimaryHandler() => new()
     {
         // MCP profiles share this connection pool. Ambient cookies could cross
         // profile boundaries on the same host; authentication stays explicit.
         UseCookies = false,
-    });
+    };
 
     internal static HttpClient Create(HttpMessageHandler innerHandler)
     {
