@@ -119,6 +119,7 @@ See [the ACL contract](openspec/specs/netclaw-acl/spec.md) and
 The gate covers authorization before dispatch. It does not prove MCP transport or native shell containment.
 
 The final local run took 88 seconds after package restore.
+The authorization PR 4 re-run killed the same 3 + 2 mutants in about 5 minutes.
 The separate CI job retains a 10-minute timeout and uploads `tool-authorization-mutation-report`.
 Its report directory is `artifacts/stryker/tool-authorization`.
 
@@ -279,7 +280,16 @@ reusable candidates. The focused test rejects other unknown output data.
 The new target took 49 seconds after package restore.
 
 The script groups targets by source project. Stryker analyzes each source project once.
-The local run on 2026-09-24 took under four minutes. CI allows 30 minutes for
+The local run on 2026-09-24 took under four minutes.
+
+Scope review for authorization PR 4 (shell facts): ShellSyntaxTree now supplies
+the approval units, the candidate verbs, and the bundled-wrapper child source.
+No marker moved, and the counts did not change (72 Security and 9 Actors
+mutants killed; the run took 5 minutes). The raw-text hard-deny scan for
+unresolved input moved to `LegacyShellTextScan` without a change to its
+algorithm. It has no focused target: `HardDenyParityCorpusTests` pins its
+outcomes, and the owner has not yet decided whether a parser-only screen
+replaces it. CI allows 30 minutes for
 hosted-runner variance and report upload. The report directory is
 `artifacts/stryker/shell-command-analysis`.
 
@@ -298,6 +308,9 @@ The job fails unless every mutant dies.
 The local calibration run took about five minutes after package restore.
 CI allows 15 minutes for hosted-runner variance and report upload.
 The report directory is `artifacts/stryker/shell-assignment`.
+The authorization PR 4 re-run killed the same 41 Security and 15 Actors
+mutants in about 4 minutes. The wrapper fallback target still covers the
+parser-decoded child source.
 
 ### Scope Review
 
