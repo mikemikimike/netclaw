@@ -111,19 +111,24 @@ internal sealed class ShellCommandAnalyzer
             return ShellAnalysisFailure.None;
         }
 
-        var innerCommands = ShellApprovalSemantics.ExtractInnerCommands(
-            command,
-            ShellPathStyle.Posix);
-        var unexpandedWrappers = parsed.Commands
+        var wrapperSources = parsed.Commands
             .Where(static occurrence => IsUnexpandedWrapperClause(occurrence.Clause))
+            .Select(FindWrapperSource)
             .ToList();
-        if (innerCommands.Count == 0 || unexpandedWrappers.Count == 0)
+        var hasDecodedWrapper = parsed.Commands
+            .Any(static occurrence => occurrence.Clause.IsCommandStringWrapped);
+        if (wrapperSources.Count == 0
+            || wrapperSources.All(static source => source is WrapperSource.Missing) && !hasDecodedWrapper)
         {
             commands.AddRange(parsed.Commands);
             return ShellAnalysisFailure.None;
         }
 
-        if (innerCommands.Count != unexpandedWrappers.Count)
+        // Every bundled wrapper needs its own child source. Source that mixes
+        // a bundled wrapper with a wrapper that the parser decoded stays
+        // unresolved.
+        if (hasDecodedWrapper
+            || wrapperSources.Any(static source => source is WrapperSource.Missing))
         {
             // Preserve the prior defense scan when wrapper extraction is incomplete.
             commands.AddRange(parsed.Commands.Where(static occurrence =>
@@ -137,7 +142,7 @@ internal sealed class ShellCommandAnalyzer
         // parser-owned position so every consumer sees execution order. Remove
         // only a direct shell dispatch; retain prefix executables such as sudo,
         // env, and nohup for hard-deny and approval policy.
-        var innerIndex = 0;
+        var sourceIndex = 0;
         foreach (var occurrence in parsed.Commands)
         {
             if (!IsUnexpandedWrapperClause(occurrence.Clause))
@@ -146,10 +151,14 @@ internal sealed class ShellCommandAnalyzer
                 continue;
             }
 
+            var childSource = wrapperSources[sourceIndex++];
+
             if (!IsTransparentShellDispatch(occurrence.Clause))
                 commands.Add(occurrence);
 
-            if (!TryResolveWrapperWorkingDirectory(
+            // A dynamic child source has no exact text to parse.
+            if (childSource is not WrapperSource.Exact exactSource
+                || !TryResolveWrapperWorkingDirectory(
                     occurrence,
                     workingDirectory,
                     out var innerWorkingDirectory))
@@ -159,7 +168,7 @@ internal sealed class ShellCommandAnalyzer
 
             var innerCommandStart = commands.Count;
             var failure = Analyze(
-                innerCommands[innerIndex++],
+                exactSource.Source,
                 innerWorkingDirectory,
                 depth + 1,
                 commands,
@@ -175,6 +184,58 @@ internal sealed class ShellCommandAnalyzer
 
         return ShellAnalysisFailure.None;
     }
+
+    /// <summary>
+    /// The child source of a bundled wrapper: the parser value of the argument
+    /// after the first short option with <c>c</c> that follows a POSIX shell word.
+    /// </summary>
+    /// <remarks>
+    /// SECURITY: the child source must be the decoded value that the shell
+    /// passes to the wrapper. A raw-text split that ignores escapes can end
+    /// the child early, for example at <c>\"</c>, and hide the commands after
+    /// that point from approval and hard-deny policy.
+    /// </remarks>
+    private abstract record WrapperSource
+    {
+        private WrapperSource()
+        {
+        }
+
+        internal sealed record Missing : WrapperSource;
+
+        internal sealed record Dynamic : WrapperSource;
+
+        internal sealed record Exact(string Source) : WrapperSource;
+    }
+
+    private static WrapperSource FindWrapperSource(CommandOccurrence occurrence)
+    {
+        var words = occurrence.Clause.Verb.Tokens
+            .Select(static token => (Raw: token, Value: (ShellValueDomain?)null))
+            .Concat(occurrence.Arguments
+                .Where(static argument => !argument.Argument.IsCwdAttribution)
+                .Select(static argument => (Raw: argument.Argument.Raw, Value: (ShellValueDomain?)argument.Value)))
+            .ToList();
+        var invoker = words.FindIndex(static word => IsShellInvokerToken(word.Raw));
+        for (var index = invoker + 1; invoker >= 0 && index < words.Count - 1; index++)
+        {
+            if (IsShortCommandOption(words[index].Raw))
+            {
+                return words[index + 1].Value is ShellValueDomain.Exact exact
+                    ? new WrapperSource.Exact(exact.Value)
+                    : new WrapperSource.Dynamic();
+            }
+        }
+
+        return new WrapperSource.Missing();
+    }
+
+    private static bool IsShortCommandOption(string raw)
+        => raw.Length > 1
+           && raw[0] == '-'
+           && !raw.StartsWith("--", StringComparison.Ordinal)
+           && raw.AsSpan(1).IndexOf('c') >= 0;
+
     private static bool TryResolveWrapperWorkingDirectory(
         CommandOccurrence occurrence,
         string? inheritedWorkingDirectory,
@@ -216,11 +277,7 @@ internal sealed class ShellCommandAnalyzer
             return false;
         }
 
-        return clause.Args.Any(static arg =>
-            arg.Raw.Length > 1
-            && arg.Raw[0] == '-'
-            && !arg.Raw.StartsWith("--", StringComparison.Ordinal)
-            && arg.Raw.AsSpan(1).IndexOf('c') >= 0);
+        return clause.Args.Any(static arg => IsShortCommandOption(arg.Raw));
     }
 
     private static bool HasShellInvokerInArguments(Clause clause)

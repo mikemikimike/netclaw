@@ -195,8 +195,15 @@ public sealed class ShellCommandPolicy
             return denyOnlyDecision;
 
         if (analysis.Failure == ShellAnalysisFailure.Unresolved || analysis.Commands.Count == 0)
-            return EvaluateLegacySegments(analysis.Source);
+        {
+            var legacyDecision = EvaluateLegacySegments(analysis.Source);
+            if (!legacyDecision.Allowed)
+                return legacyDecision;
+        }
 
+        // An unresolved analysis can still hold parser clauses, for example
+        // the decoded child of a wrapper. The legacy text scan does not decode
+        // escapes in a wrapper argument, so it can miss those clauses.
         foreach (var occurrence in analysis.Commands)
         {
             var decision = EvaluateClause(occurrence.Clause);

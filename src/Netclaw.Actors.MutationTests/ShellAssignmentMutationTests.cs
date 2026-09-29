@@ -138,6 +138,50 @@ public sealed class ShellAssignmentMutationTests
     }
 
     [Fact]
+    public void Wrapper_child_source_is_the_decoded_argument_value()
+    {
+        var environment = ShellExecutionEnvironment.CreateBash(
+            ShellPlatform.Linux,
+            new Version(5, 2));
+        var analyzer = new ShellCommandAnalyzer(environment);
+        var escaped = analyzer.Analyze(
+            "bash -lc \"echo \\\"a b\\\"; rm -rf ~/work\"",
+            "/work");
+        var optionFirst = analyzer.Analyze(
+            "bash --norc -lc \"echo \\\"a b\\\"; rm -rf ~/work\"",
+            "/work");
+        var dynamic = analyzer.Analyze(
+            "bash -lc \"$CHILD\"",
+            "/work");
+        var missing = analyzer.Analyze(
+            "bash -lc",
+            "/work");
+        var policy = new ShellCommandPolicy(environment);
+
+        Assert.True(escaped.IsResolved);
+        Assert.Equal(
+            ["echo", "rm"],
+            escaped.Commands.Select(static command => command.Clause.Verb.Tokens[0]));
+        Assert.True(optionFirst.IsResolved);
+        Assert.Equal(
+            ["echo", "rm"],
+            optionFirst.Commands.Select(static command => command.Clause.Verb.Tokens[0]));
+        Assert.False(dynamic.IsResolved);
+        // The option is the last word, so the wrapper has no child source.
+        Assert.Equal(
+            ["bash"],
+            missing.Commands.Select(static command => command.Clause.Verb.Tokens[0]));
+        Assert.False(policy.Evaluate(
+            "bash -lc \"echo \\\"a b\\\"; netclaw daemon stop\"",
+            "/work").Allowed);
+        // The assignment keeps this analysis unresolved. The decoded child
+        // clauses must still meet the hard-deny list.
+        Assert.False(policy.Evaluate(
+            "bash -lc \"echo \\\"a b\\\"; X=1 netclaw daemon stop\"",
+            "/work").Allowed);
+    }
+
+    [Fact]
     public void Bash_strong_initial_state_requires_the_complete_host_identity()
     {
         AssertBounded(ShellExecutionEnvironment.CreateBash(

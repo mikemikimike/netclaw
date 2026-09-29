@@ -142,6 +142,25 @@ read -r wrapper_start wrapper_end wrapper_start_line wrapper_start_column wrappe
 )
 security_patterns+=("ShellCommandAnalysis.cs{$wrapper_start..$wrapper_end}")
 
+read -r source_start source_end source_start_line source_start_column source_end_line source_end_column < <(
+  find_span \
+    "$analysis_file" \
+    "private static WrapperSource FindWrapperSource" \
+    "var invoker = words.FindIndex" \
+    "return new WrapperSource.Missing();"
+)
+security_patterns+=("ShellCommandAnalysis.cs{$source_start..$source_end}")
+
+policy_file="$repo_root/src/Netclaw.Security/ShellCommandPolicy.cs"
+read -r unresolved_start unresolved_end unresolved_start_line unresolved_start_column unresolved_end_line unresolved_end_column < <(
+  find_span \
+    "$policy_file" \
+    "An unresolved analysis can still hold parser clauses" \
+    "foreach (var occurrence in analysis.Commands)" \
+    "return decision;"
+)
+security_patterns+=("ShellCommandPolicy.cs{$unresolved_start..$unresolved_end}")
+
 environment_file="$repo_root/src/Netclaw.Security/ShellExecutionEnvironment.cs"
 read -r mode_start mode_end mode_start_line mode_start_column mode_end_line mode_end_column < <(
   find_span \
@@ -194,10 +213,12 @@ security_patterns+=("ShellExecutionEnvironment.cs{$sanitizer_start..$sanitizer_e
 security_output="$output_path/security"
 run_group "stryker-shell-command-analysis.json" "$security_output" "${security_patterns[@]}"
 security_report="$security_output/reports/mutation-report.json"
-assert_report "$security_report" 41
+assert_report "$security_report" 51
 assert_target "$security_report" "digest-match" "$matching_file" "$matching_start_line" "$matching_start_column" "$matching_end_line" "$matching_end_column" 2
 assert_target "$security_report" "assignment-span" "$analysis_file" "$span_start_line" "$span_start_column" "$span_end_line" "$span_end_column" 1
 assert_target "$security_report" "fallback-wrapper-assignments" "$analysis_file" "$wrapper_start_line" "$wrapper_start_column" "$wrapper_end_line" "$wrapper_end_column" 4
+assert_target "$security_report" "wrapper-child-source" "$analysis_file" "$source_start_line" "$source_start_column" "$source_end_line" "$source_end_column" 9
+assert_target "$security_report" "unresolved-child-hard-deny" "$policy_file" "$unresolved_start_line" "$unresolved_start_column" "$unresolved_end_line" "$unresolved_end_column" 1
 assert_target "$security_report" "bash-initial-state" "$environment_file" "$mode_start_line" "$mode_start_column" "$mode_end_line" "$mode_end_column" 7
 assert_target "$security_report" "bash-sanitizer" "$environment_file" "$sanitizer_start_line" "$sanitizer_start_column" "$sanitizer_end_line" "$sanitizer_end_column" 27
 
