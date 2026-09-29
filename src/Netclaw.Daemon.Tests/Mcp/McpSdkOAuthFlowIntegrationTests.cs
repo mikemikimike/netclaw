@@ -577,6 +577,28 @@ public sealed class McpSdkOAuthFlowIntegrationTests
     }
 
     [Fact]
+    public async Task RefreshResponseWithStringExpiresInIsStored()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var server = await FakeOAuthMcpServer.StartAsync(ct);
+        using var directory = new DisposableTempDir();
+        await using var harness = CreateManagerHarness(server, directory.Path);
+        await CompleteManagerAuthorizationAsync(server, harness, ct);
+        server.ReturnExpiresInAsString();
+        server.RevokeAccessToken(server.TokenRequests[^1].IssuedAccessToken);
+        var authorizationsBefore = server.AuthorizationRequests.Count;
+
+        await harness.Manager.TryReconnectAsync(harness.ServerName, ct);
+
+        Assert.Equal(1, server.RefreshGrantCount);
+        Assert.Equal(McpConnectionState.Connected, harness.Manager.GetServerStatuses()[harness.ServerName].State);
+        Assert.Equal(authorizationsBefore, server.AuthorizationRequests.Count);
+        var active = harness.Credentials.GetActiveForTests(harness.ServerName);
+        Assert.Equal(server.RefreshRequests[^1].IssuedAccessToken, active?.AccessToken.Value);
+        Assert.NotNull(active?.ExpiresAt);
+    }
+
+    [Fact]
     public async Task RejectedClientIdentityIsDiscardedSoTheNextAuthorizationRegistersAfresh()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -1028,7 +1050,7 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         bool failToolListing,
         ILogger logger) : IMcpClientRuntime
     {
-        private readonly McpClientRuntime _production = new(logger, server.CreateTestServerHandler());
+        private readonly McpClientRuntime _production = new(logger, TimeProvider.System, server.CreateTestServerHandler());
         private int _createCount;
         private int _failNextToolListing;
 
@@ -1208,6 +1230,8 @@ public sealed class McpSdkOAuthFlowIntegrationTests
 
         public void IssuePublicClients() => _state.IssuePublicClients();
 
+        public void ReturnExpiresInAsString() => _state.ReturnExpiresInAsString();
+
         public int RefreshGrantCount => _state.RefreshGrantCount;
 
         public int RefreshAttemptCount => _state.RefreshAttemptCount;
@@ -1354,6 +1378,7 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         private IReadOnlyDictionary<string, string> _lastMcpHeaders = new Dictionary<string, string>();
         private volatile string[] _tokenEndpointAuthMethods = ["client_secret_post"];
         private volatile bool _issuePublicClients;
+        private volatile bool _expiresInAsString;
 
         public FakeOAuthMcpServerState(
             Uri origin,
@@ -1634,6 +1659,17 @@ public sealed class McpSdkOAuthFlowIntegrationTests
             _acceptedAccessTokens[issuedAccessToken] = 0;
             Interlocked.Increment(ref _refreshGrantCount);
 
+            if (_expiresInAsString)
+            {
+                return Results.Json(new
+                {
+                    access_token = issuedAccessToken,
+                    refresh_token = issuedRefreshToken,
+                    token_type = "Bearer",
+                    expires_in = "3599",
+                });
+            }
+
             return Results.Json(new
             {
                 access_token = issuedAccessToken,
@@ -1656,6 +1692,9 @@ public sealed class McpSdkOAuthFlowIntegrationTests
 
         /// <summary>Registers later dynamic clients as public clients, issuing no client secret.</summary>
         public void IssuePublicClients() => _issuePublicClients = true;
+
+        /// <summary>Sends <c>expires_in</c> as a JSON string in refresh responses, as some providers do.</summary>
+        public void ReturnExpiresInAsString() => _expiresInAsString = true;
 
         public int RefreshGrantCount => Volatile.Read(ref _refreshGrantCount);
 

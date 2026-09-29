@@ -122,20 +122,27 @@ internal sealed class McpOAuthTokenCache : ITokenCache
     internal string? GetRedeemableRefreshToken() => _store.GetRedeemableRefreshToken(this);
 
     /// <summary>
-    /// Records a refresh grant that the token endpoint accepted, before the gate opens for
-    /// the next connection.
+    /// Registers a refresh grant that this connection sends with
+    /// <paramref name="presentedRefreshToken"/>. Its <see cref="PendingRefreshGrant.Stored"/>
+    /// task completes when the SDK stores tokens through this cache, which ends the grant.
     /// </summary>
-    internal void RecordRefreshGrant(string presentedRefreshToken, McpOAuthIssuedTokens issued)
-        => _store.RecordRefreshGrant(this, presentedRefreshToken, issued);
+    internal PendingRefreshGrant BeginRefreshGrant(string presentedRefreshToken)
+        => _store.BeginRefreshGrant(this, presentedRefreshToken);
+
+    /// <summary>Ends a refresh grant that will not produce a store, and signals it.</summary>
+    internal void AbandonRefreshGrant(PendingRefreshGrant pending) => _store.AbandonRefreshGrant(this, pending);
+
+    /// <summary>The refresh grant in flight on this connection, if any.</summary>
+    internal PendingRefreshGrant? PendingRefresh { get; set; }
 }
 
-/// <summary>The token fields of an accepted token endpoint response.</summary>
-internal sealed record McpOAuthIssuedTokens(
-    string AccessToken,
-    string? RefreshToken,
-    int? ExpiresIn,
-    string TokenType,
-    string? Scope);
+/// <summary>A refresh grant that waits for the SDK to store its result.</summary>
+internal sealed class PendingRefreshGrant(string presentedRefreshToken)
+{
+    public string PresentedRefreshToken { get; } = presentedRefreshToken;
+
+    public TaskCompletionSource Stored { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
 
 /// <summary>
 /// Durable authority for active MCP OAuth credentials. The daemon lifecycle
@@ -386,7 +393,50 @@ internal sealed class McpOAuthCredentialStore
         cancellationToken.ThrowIfCancellationRequested();
         var state = GetState(cache.ServerName);
         lock (state.Sync)
-            StoreTokensLocked(cache, state, tokens, cancellationToken);
+        {
+            var pending = cache.PendingRefresh;
+            cache.PendingRefresh = null;
+            try
+            {
+                // The provider accepted the presented refresh token and issued another, so a
+                // later store that still carries the presented one holds an older grant.
+                if (pending is not null
+                    && tokens.RefreshToken is not null
+                    && !string.Equals(tokens.RefreshToken, pending.PresentedRefreshToken, StringComparison.Ordinal))
+                    state.MarkConsumed(pending.PresentedRefreshToken);
+
+                StoreTokensLocked(cache, state, tokens, cancellationToken);
+            }
+            finally
+            {
+                pending?.Stored.TrySetResult();
+            }
+        }
+    }
+
+    internal PendingRefreshGrant BeginRefreshGrant(McpOAuthTokenCache cache, string presentedRefreshToken)
+    {
+        var state = GetState(cache.ServerName);
+        lock (state.Sync)
+        {
+            // The SDK serializes grants per connection, so an older entry is abandoned.
+            cache.PendingRefresh?.Stored.TrySetResult();
+            var pending = new PendingRefreshGrant(presentedRefreshToken);
+            cache.PendingRefresh = pending;
+            return pending;
+        }
+    }
+
+    internal void AbandonRefreshGrant(McpOAuthTokenCache cache, PendingRefreshGrant pending)
+    {
+        var state = GetState(cache.ServerName);
+        lock (state.Sync)
+        {
+            if (ReferenceEquals(cache.PendingRefresh, pending))
+                cache.PendingRefresh = null;
+        }
+
+        pending.Stored.TrySetResult();
     }
 
     internal SemaphoreSlim GetRefreshGate(McpServerName serverName) => GetState(serverName).RefreshGate;
@@ -396,52 +446,6 @@ internal sealed class McpOAuthCredentialStore
         var state = GetState(cache.ServerName);
         lock (state.Sync)
             return FollowsActiveRecord(cache, state) ? state.Active!.RefreshToken?.Value : null;
-    }
-
-    /// <summary>
-    /// Persists a refresh grant the token endpoint accepted. The token handler calls this
-    /// while it holds the refresh gate, so the next connection redeems the new refresh token.
-    /// The redeemed token is remembered as consumed: a late SDK store that carries it holds
-    /// an older grant and is ignored.
-    /// </summary>
-    internal void RecordRefreshGrant(
-        McpOAuthTokenCache cache,
-        string presentedRefreshToken,
-        McpOAuthIssuedTokens issued)
-    {
-        var state = GetState(cache.ServerName);
-        lock (state.Sync)
-        {
-            if (cache.ExplicitAuthorization && !cache.Published)
-                return;
-
-            if (issued.RefreshToken is not null
-                && !string.Equals(issued.RefreshToken, presentedRefreshToken, StringComparison.Ordinal))
-                state.MarkConsumed(presentedRefreshToken);
-
-            var tokens = new TokenContainer
-            {
-                AccessToken = issued.AccessToken,
-                RefreshToken = issued.RefreshToken,
-                ExpiresIn = issued.ExpiresIn,
-                TokenType = issued.TokenType,
-                Scope = issued.Scope,
-                ObtainedAt = _timeProvider.GetUtcNow(),
-                AuthorizationServer = cache.Credentials?.AuthorizationServer,
-                TokenEndpointAuthMethod = cache.Credentials?.TokenEndpointAuthMethod,
-            };
-            try
-            {
-                StoreTokensLocked(cache, state, tokens, CancellationToken.None);
-            }
-            catch (McpOAuthRetiredCredentialWriterException ex)
-            {
-                // The SDK stores the same tokens next and receives the same refusal.
-                _logger.LogDebug(ex,
-                    "Did not record a refresh grant of a retired OAuth connection for MCP server '{Name}'",
-                    cache.ServerName.Value);
-            }
-        }
     }
 
     private void StoreTokensLocked(

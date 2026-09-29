@@ -2307,10 +2307,11 @@ internal interface IMcpClientRuntime
 internal sealed class McpClientRuntime : IMcpClientRuntime
 {
     private readonly ILogger _logger;
+    private readonly TimeProvider _timeProvider;
     private readonly HttpMessageHandler _primaryHandler;
 
-    public McpClientRuntime(ILogger<McpClientRuntime> logger)
-        : this(logger, McpHttpClientFactory.SharedPrimaryHandler)
+    public McpClientRuntime(ILogger<McpClientRuntime> logger, TimeProvider timeProvider)
+        : this(logger, timeProvider, McpHttpClientFactory.SharedPrimaryHandler)
     {
     }
 
@@ -2318,9 +2319,10 @@ internal sealed class McpClientRuntime : IMcpClientRuntime
     /// Builds the runtime over <paramref name="primaryHandler"/>, which the runtime never
     /// disposes. Tests pass an in-memory server here to drive the production handler chain.
     /// </summary>
-    internal McpClientRuntime(ILogger logger, HttpMessageHandler primaryHandler)
+    internal McpClientRuntime(ILogger logger, TimeProvider timeProvider, HttpMessageHandler primaryHandler)
     {
         _logger = logger;
+        _timeProvider = timeProvider;
         _primaryHandler = primaryHandler;
     }
 
@@ -2332,13 +2334,30 @@ internal sealed class McpClientRuntime : IMcpClientRuntime
 
     /// <summary>
     /// Builds the HTTP client of one connection. Each connection gets its own
-    /// <see cref="OAuthRefreshGrantHandler"/> bound to its token cache. All connections share
-    /// the process connection pool, which a disposed client leaves open.
+    /// <see cref="OAuthRefreshGrantHandler"/> bound to its token cache, and disposing the
+    /// client disposes that handler. All connections share the process connection pool,
+    /// which <see cref="SharedHandlerLease"/> keeps open.
     /// </summary>
     internal HttpClient CreateHttpClient(McpOAuthTokenCache? tokenCache)
         => McpHttpClientFactory.Create(
-            new OAuthRefreshGrantHandler(_logger, tokenCache) { InnerHandler = _primaryHandler },
-            disposeHandler: false);
+            new OAuthRefreshGrantHandler(_logger, _timeProvider, tokenCache)
+            {
+                InnerHandler = new SharedHandlerLease { InnerHandler = _primaryHandler },
+            },
+            disposeHandler: true);
+
+    /// <summary>
+    /// Forwards to a handler that other connections share. Disposing the lease leaves the
+    /// shared handler open.
+    /// </summary>
+    private sealed class SharedHandlerLease : DelegatingHandler
+    {
+        protected override void Dispose(bool disposing)
+        {
+            // DelegatingHandler.Dispose disposes the inner handler. The shared pool outlives
+            // every connection, so the lease deliberately does not call the base method.
+        }
+    }
 
     public Task<McpClient> CreateAsync(
         IClientTransport transport,

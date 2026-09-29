@@ -20,29 +20,43 @@ namespace Netclaw.Daemon.Mcp;
 /// one server can read the same refresh token and both redeem it. A rotating provider accepts
 /// the first grant and rejects the second with <c>invalid_grant</c>, and the SDK then asks for
 /// interactive authorization although the store holds a live refresh token. This handler sits
-/// on the SDK's token request path, so it closes that race:
+/// on the SDK's token request path and closes that race:
 /// </para>
 /// <list type="bullet">
-/// <item>It holds the server's refresh gate from the grant until the store records the
-/// result.</item>
+/// <item>It holds the server's refresh gate from the grant until the SDK stores the result
+/// through this connection's cache. The SDK stays the only writer of tokens.</item>
 /// <item>It sends the refresh token the store holds now, when the connection follows the
 /// active record and holds an older one.</item>
 /// </list>
+/// <para>
+/// The gate opens at once on a rejected grant, a transport fault, or cancellation, and
+/// after <see cref="StoreSignalTimeout"/> when an accepted grant never reaches the store.
+/// </para>
 /// <para>
 /// The SDK also discards a rejected grant's response. This handler logs the endpoint, the
 /// status, and the two RFC 6749 error fields. It never logs a request body, because that body
 /// carries the refresh token and the client secret.
 /// </para>
 /// </remarks>
-internal sealed class OAuthRefreshGrantHandler(ILogger logger, McpOAuthTokenCache? cache) : DelegatingHandler
+internal sealed class OAuthRefreshGrantHandler(
+    ILogger logger,
+    TimeProvider timeProvider,
+    McpOAuthTokenCache? cache) : DelegatingHandler
 {
+    /// <summary>
+    /// How long an accepted grant holds the gate while the SDK parses and stores the tokens.
+    /// </summary>
+    internal static readonly TimeSpan StoreSignalTimeout = TimeSpan.FromSeconds(5);
+
     private const string FormContentType = "application/x-www-form-urlencoded";
     private const string RefreshTokenGrant = "grant_type=refresh_token";
     private const string RefreshTokenField = "refresh_token";
     private const int MaxFieldLength = 200;
 
-    /// <summary>A token response is small. A larger body is not parsed.</summary>
-    private const int MaxBufferedBody = 64 * 1024;
+    /// <summary>An error body larger than this is not read.</summary>
+    private const int MaxBufferedErrorBody = 64 * 1024;
+
+    private PendingRefreshGrant? _pending;
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
@@ -58,7 +72,9 @@ internal sealed class OAuthRefreshGrantHandler(ILogger logger, McpOAuthTokenCach
         if (!requestBody.Contains(RefreshTokenGrant, StringComparison.Ordinal))
             return await base.SendAsync(request, cancellationToken);
 
-        if (cache is null)
+        var form = ParseForm(requestBody);
+        var presented = form.FirstOrDefault(pair => pair.Key == RefreshTokenField).Value;
+        if (cache is null || presented is null)
         {
             var uncoordinated = await base.SendAsync(request, cancellationToken);
             await LogIfRejectedAsync(request, uncoordinated, cancellationToken);
@@ -67,24 +83,27 @@ internal sealed class OAuthRefreshGrantHandler(ILogger logger, McpOAuthTokenCach
 
         var gate = cache.RefreshGate;
         await gate.WaitAsync(cancellationToken);
+        PendingRefreshGrant? pending = null;
+        var holdUntilStored = false;
         try
         {
-            var form = ParseForm(requestBody);
-            var presented = form.FirstOrDefault(pair => pair.Key == RefreshTokenField).Value;
             var current = cache.GetRedeemableRefreshToken();
             if (current is not null && !string.Equals(current, presented, StringComparison.Ordinal))
             {
+                var original = request.Content;
                 request.Content = new FormUrlEncodedContent(form
                     .Select(pair => pair.Key == RefreshTokenField
                         ? new KeyValuePair<string, string>(pair.Key, current)
                         : pair)
                     .ToList());
+                original.Dispose();
                 presented = current;
                 logger.LogInformation(
                     "MCP server '{Name}' redeemed the refresh token that another connection rotated",
                     cache.ServerName.Value);
             }
 
+            pending = cache.BeginRefreshGrant(presented);
             var response = await base.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
@@ -92,14 +111,50 @@ internal sealed class OAuthRefreshGrantHandler(ILogger logger, McpOAuthTokenCach
                 return response;
             }
 
-            if (presented is not null
-                && await ReadBoundedAsync(response, cancellationToken) is { } body
-                && ReadIssuedTokens(body) is { } issued)
-                cache.RecordRefreshGrant(presented, issued);
+            holdUntilStored = true;
+            _pending = pending;
+            _ = ReleaseAfterStoreAsync(gate, pending);
             return response;
         }
         finally
         {
+            if (!holdUntilStored)
+            {
+                if (pending is not null)
+                    cache.AbandonRefreshGrant(pending);
+                gate.Release();
+            }
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        // A disposed connection never stores the grant, so the gate must not wait for it.
+        if (disposing)
+            _pending?.Stored.TrySetResult();
+        base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// Opens the gate when the SDK stores the grant, when the connection is disposed, or
+    /// after <see cref="StoreSignalTimeout"/>. The request token is not used: HttpClient
+    /// disposes it when the response returns.
+    /// </summary>
+    private async Task ReleaseAfterStoreAsync(SemaphoreSlim gate, PendingRefreshGrant pending)
+    {
+        try
+        {
+            await pending.Stored.Task.WaitAsync(StoreSignalTimeout, timeProvider);
+        }
+        catch (TimeoutException)
+        {
+            logger.LogDebug(
+                "MCP server '{Name}' refresh grant ended without a token store; opening the refresh gate",
+                cache!.ServerName.Value);
+        }
+        finally
+        {
+            cache!.AbandonRefreshGrant(pending);
             gate.Release();
         }
     }
@@ -136,22 +191,22 @@ internal sealed class OAuthRefreshGrantHandler(ILogger logger, McpOAuthTokenCach
         };
 
     /// <summary>
-    /// Buffers a response body of at most <see cref="MaxBufferedBody"/> bytes so the SDK can
-    /// still read it. Returns <c>null</c> for a larger or unreadable body.
+    /// Buffers an error body of at most <see cref="MaxBufferedErrorBody"/> bytes. Returns
+    /// <c>null</c> for a larger or unreadable body.
     /// </summary>
     private static async Task<string?> ReadBoundedAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
-        if (response.Content.Headers.ContentLength is > MaxBufferedBody)
+        if (response.Content.Headers.ContentLength is > MaxBufferedErrorBody)
             return null;
 
         try
         {
-            await response.Content.LoadIntoBufferAsync(MaxBufferedBody, cancellationToken);
+            await response.Content.LoadIntoBufferAsync(MaxBufferedErrorBody, cancellationToken);
             return await response.Content.ReadAsStringAsync(cancellationToken);
         }
         catch (HttpRequestException)
         {
-            // Diagnostics and grant records are best effort; the SDK reports the transport fault.
+            // The log line reports the status without the error fields.
             return null;
         }
     }
@@ -166,33 +221,6 @@ internal sealed class OAuthRefreshGrantHandler(ILogger logger, McpOAuthTokenCach
                     parts.Length == 2 ? WebUtility.UrlDecode(parts[1]) : string.Empty);
             })
             .ToList();
-
-    private static McpOAuthIssuedTokens? ReadIssuedTokens(string body)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(body);
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || ReadString(root, "access_token") is not { Length: > 0 } accessToken)
-                return null;
-
-            int? expiresIn = root.TryGetProperty("expires_in", out var expires) && expires.TryGetInt32(out var seconds)
-                ? seconds
-                : null;
-            return new McpOAuthIssuedTokens(
-                accessToken,
-                ReadString(root, "refresh_token"),
-                expiresIn,
-                ReadString(root, "token_type") ?? "Bearer",
-                ReadString(root, "scope"));
-        }
-        catch (JsonException)
-        {
-            // The SDK parses the same body and reports a malformed token response itself.
-            return null;
-        }
-    }
 
     private static (string? Error, string? Description) ReadOAuthError(string? body)
     {
