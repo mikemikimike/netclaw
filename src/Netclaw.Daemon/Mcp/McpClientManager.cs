@@ -76,6 +76,13 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     /// </summary>
     internal static readonly TimeSpan StdioDiscoverProbeTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Bounds the protected-resource metadata read that OAuth failure diagnostics make. The
+    /// read runs on the connect and catalog-refresh failure paths, so an unreachable server
+    /// must not hold them for the default HTTP timeout.
+    /// </summary>
+    private static readonly TimeSpan DiagnosticDiscoveryTimeout = TimeSpan.FromSeconds(10);
+
     public McpClientManager(
         Dictionary<string, McpServerEntry> serverEntries,
         ToolRegistry toolRegistry,
@@ -380,7 +387,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                     && !IsOAuthChallenge(ex))
                     MarkToolAuthFailure(current.Name, GetHttpStatusText(ex), oauthManaged: false);
                 else
-                    MarkAwaitingAuthorization(lifecycle, current, ex, entry.Url);
+                    await MarkAwaitingAuthorizationAsync(lifecycle, current, ex, entry.Url);
 
                 return McpCatalogRefreshResult.Failed;
             }
@@ -908,7 +915,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                     now);
             lifecycle.Publish(WithFailureStatus(current, failureStatus));
             if (IsAuthFailure(ex))
-                LogOAuthRefreshFailureDiagnostics(current.Name.Value, entry.Url);
+                await LogOAuthRefreshFailureDiagnosticsAsync(current.Name.Value, entry.Url);
             if (current.IsConnected)
             {
                 _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex),
@@ -1709,7 +1716,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     /// a dead token, but keep the catalog visible — wiping it would hide which server needs
     /// reauthorization.
     /// </summary>
-    private void MarkAwaitingAuthorization(
+    private async Task MarkAwaitingAuthorizationAsync(
         McpServerLifecycle lifecycle,
         McpServerSnapshot current,
         Exception ex,
@@ -1721,7 +1728,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
         _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex),
             "MCP server '{Name}' lost OAuth authorization during catalog refresh; marked AwaitingAuth",
             current.Name.Value);
-        LogOAuthRefreshFailureDiagnostics(current.Name.Value, resourceUrl);
+        await LogOAuthRefreshFailureDiagnosticsAsync(current.Name.Value, resourceUrl);
         EmitAuthAlert(current.Name,
             $"MCP server '{current.Name.Value}' lost OAuth authorization. Run: netclaw mcp auth {current.Name.Value}",
             "authorization_expired");
@@ -1729,15 +1736,21 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
 
     /// <summary>
     /// When a stored OAuth record can no longer produce a working access token, the SDK
-    /// 2.0 refresh path fails silently: a refresh is only attempted when the cached token
-    /// container matches the live provider on all four binding fields — AuthorizationServer,
-    /// ClientId, ClientSecret, and TokenEndpointAuthMethod — and even then the actual
-    /// refresh HTTP response is swallowed (returned as a null access token, surfaced as a
-    /// generic "null authorization result" failure). This method makes the failure
-    /// diagnosable by reporting exactly which binding field is missing or mismatched and
-    /// whether a refresh token existed to redeem at all.
+    /// falls through to interactive authorization and reports only a generic failure. Two
+    /// different causes look the same from outside:
+    /// <list type="bullet">
+    /// <item>The SDK never sent the refresh grant. SDK 2.x redeems the refresh token only
+    /// when a client id is known and the stored authorization server is the exact string the
+    /// resource advertises now. Netclaw builds the token container and the provider options
+    /// from one identity, so the client id, the client secret, and the token endpoint auth
+    /// method cannot disagree with each other. A public client has no secret by design.</item>
+    /// <item>The SDK sent the refresh grant and the authorization server rejected it. The SDK
+    /// discards that error response.</item>
+    /// </list>
+    /// This method reads the advertised authorization server again and applies the same
+    /// ordinal comparison, so the log names the cause.
     /// </summary>
-    private void LogOAuthRefreshFailureDiagnostics(string serverName, string? resourceUrl)
+    private async Task LogOAuthRefreshFailureDiagnosticsAsync(string serverName, string? resourceUrl)
     {
         try
         {
@@ -1755,40 +1768,69 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                 return;
             }
 
-            var hasConfiguredClientSecret = _serverEntries.TryGetValue(serverName, out var entry)
+            var entry = _serverEntries.GetValueOrDefault(serverName);
+            var hasConfiguredClientSecret = entry is not null
                                             && !string.IsNullOrWhiteSpace(entry.OAuthClientId)
                                             && !entry.OAuthClientSecret.IsNullOrEmpty();
-            var missing = new List<string>();
-            if (string.IsNullOrWhiteSpace(record.AuthorizationServer))
-                missing.Add("AuthorizationServer");
-            if (string.IsNullOrWhiteSpace(record.ClientId))
-                missing.Add("ClientId");
-            if (record.ClientSecret is null && !hasConfiguredClientSecret)
-                missing.Add("ClientSecret");
-            if (string.IsNullOrWhiteSpace(record.TokenEndpointAuthMethod))
-                missing.Add("TokenEndpointAuthMethod");
+            var hasClientId = !string.IsNullOrWhiteSpace(entry?.OAuthClientId)
+                              || !string.IsNullOrWhiteSpace(record.ClientId);
 
-            var hasRefreshToken = record.RefreshToken is not null;
-            var hasAccessToken = record.AccessToken is not null;
-            var expiresAt = record.ExpiresAt;
+            string? advertisedAuthorizationServer;
+            using (var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token))
+            {
+                probeTimeout.CancelAfter(DiagnosticDiscoveryTimeout);
+                try
+                {
+                    advertisedAuthorizationServer = await _registrar.TryDiscoverAdvertisedAuthorizationServerAsync(
+                        resourceUrl,
+                        probeTimeout.Token);
+                }
+                catch (OperationCanceledException) when (!_lifetimeCancellation.IsCancellationRequested)
+                {
+                    // The diagnostic reports "<unavailable>" and says it cannot tell the cause.
+                    advertisedAuthorizationServer = null;
+                }
+            }
+
+            var blockers = new List<string>();
+            if (record.RefreshToken is null)
+                blockers.Add("RefreshToken absent");
+            if (!hasClientId)
+                blockers.Add("ClientId absent");
+            if (string.IsNullOrWhiteSpace(record.AuthorizationServer))
+                blockers.Add("AuthorizationServer absent");
+            else if (advertisedAuthorizationServer is not null
+                     && !string.Equals(record.AuthorizationServer, advertisedAuthorizationServer, StringComparison.Ordinal))
+                blockers.Add(DescribeAuthorizationServerMismatch(record.AuthorizationServer, advertisedAuthorizationServer));
+
+            var conclusion = blockers.Count > 0
+                ? "The SDK did not send a refresh grant because of the fields in refreshBlockedBy. " +
+                  "SDK 2.x compares the stored authorization server with the advertised one as exact strings."
+                : advertisedAuthorizationServer is null
+                    ? "Netclaw could not read the advertised authorization server, so it cannot tell if the SDK " +
+                      "sent a refresh grant."
+                    : "The stored record satisfies the SDK refresh gate, so the SDK sent a refresh grant and the " +
+                      "authorization server rejected it. The SDK discards the token endpoint error. The refresh " +
+                      "token is probably expired, revoked, or already consumed by an earlier rotation.";
 
             _logger.LogWarning(
                 "OAuth refresh failure diagnostics for MCP server '{Name}': stored record has refreshToken={HasRefresh}, " +
                 "accessToken={HasAccess}, expiresAt={ExpiresAt:o}, dynamicClientRegistration={Dcr}, " +
-                "configuredClientSecret={HasConfiguredClientSecret}, bindingFieldsMissing=[{Missing}], " +
-                "authorizationServer={AuthServer}. " +
-                "The SDK 2.0 refresh gate requires AuthorizationServer, ClientId, ClientSecret, and " +
-                "TokenEndpointAuthMethod to all match the live provider; missing fields mean refresh is " +
-                "never attempted and every expiration falls through to interactive auth (the 'null " +
-                "authorization result' symptom).",
+                "clientSecret={HasClientSecret}, configuredClientSecret={HasConfiguredClientSecret}, " +
+                "tokenEndpointAuthMethod={AuthMethod}, authorizationServer={AuthServer}, " +
+                "advertisedAuthorizationServer={AdvertisedAuthServer}, refreshBlockedBy=[{Blockers}]. {Conclusion}",
                 serverName,
-                hasRefreshToken,
-                hasAccessToken,
-                expiresAt,
+                record.RefreshToken is not null,
+                record.AccessToken is not null,
+                record.ExpiresAt,
                 record.DynamicClientRegistration,
+                record.ClientSecret is not null,
                 hasConfiguredClientSecret,
-                string.Join(", ", missing),
-                record.AuthorizationServer ?? "<null>");
+                record.TokenEndpointAuthMethod ?? "<null>",
+                record.AuthorizationServer ?? "<null>",
+                advertisedAuthorizationServer ?? "<unavailable>",
+                string.Join(", ", blockers),
+                conclusion);
         }
         catch (Exception diagEx)
         {
@@ -1796,6 +1838,18 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                 "Failed to produce OAuth refresh diagnostics for MCP server '{Name}'",
                 serverName);
         }
+    }
+
+    private static string DescribeAuthorizationServerMismatch(string stored, string advertised)
+    {
+        // Uri equality ignores a trailing slash and host case. The SDK does not, so an
+        // equivalent identifier in a different form still blocks the refresh.
+        var sameServer = Uri.TryCreate(stored, UriKind.Absolute, out var storedUri)
+                         && Uri.TryCreate(advertised, UriKind.Absolute, out var advertisedUri)
+                         && storedUri == advertisedUri;
+        return sameServer
+            ? $"AuthorizationServer differs only in form (stored '{stored}', advertised '{advertised}')"
+            : $"AuthorizationServer changed (stored '{stored}', advertised '{advertised}')";
     }
 
     private static bool IsAuthFailure(Exception ex)
