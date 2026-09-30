@@ -147,6 +147,48 @@ public sealed class LinkParentSegmentApprovalTests(ShellApprovalMatrixFixture fi
         Assert.Equal(["touch"], linkOnly.Prompt.CandidateVerbs);
     }
 
+    // A quoted glob character in a redirect target is plain path text. The
+    // grant keeps covering it, until the directory before ".." is a link.
+    [SlopwatchSuppress("SW001", "The case uses a POSIX symbolic link and Bash authorization behavior.")]
+    [Theory(SkipUnless = nameof(IsPosix), Skip = "The case uses a POSIX symbolic link and Bash authorization behavior.")]
+    [InlineData("d[1]", "echo hi > 'd[1]/../out.txt'")]
+    [InlineData("a*b", "echo hi > \"a*b/../out.txt\"")]
+    public async Task Quoted_redirect_text_is_a_literal_path(string directory, string command)
+    {
+        await using var harness = await CreateLinkedProjectHarnessAsync(
+            "link-parent-quoted-redirect",
+            Approvals.PersistentHere(ApprovalDirectoryShape.Project, "echo"));
+        harness.CreateProjectDirectory(directory);
+
+        var plain = await harness.EvaluateShellAsync(command, Ct);
+        Assert.Equal(ApprovalOutcome.Allowed, plain.Outcome);
+        Assert.Equal(ApprovalAllowReason.StoredApproval, plain.AllowReason);
+
+        harness.ReplaceProjectDirectoryWithExternalSymlink(directory);
+        var linked = await harness.EvaluateShellAsync(command, Ct);
+        AssertExactConsentOnly(linked);
+    }
+
+    // The shell expands these words at run time, so the segment before ".."
+    // is not known. Each stays exact consent only, with or without a link.
+    [SlopwatchSuppress("SW001", "The case uses Bash authorization behavior on a POSIX host.")]
+    [Theory(SkipUnless = nameof(IsPosix), Skip = "The case uses Bash authorization behavior on a POSIX host.")]
+    [InlineData("echo hi > src/*/../out.txt")]
+    [InlineData("echo hi > src/[ab]/../out.txt")]
+    [InlineData("echo hi > src/{a,b}/../out.txt")]
+    public async Task Unquoted_expansion_before_a_parent_segment_stays_unresolved(string command)
+    {
+        await using var harness = await CreateLinkedProjectHarnessAsync(
+            "link-parent-unquoted-expansion",
+            Approvals.PersistentHere(ApprovalDirectoryShape.Project, "echo"));
+        harness.CreateProjectDirectory("src/a");
+        harness.CreateProjectDirectory("src/b");
+
+        var decision = await harness.EvaluateShellAsync(command, Ct);
+
+        AssertExactConsentOnly(decision);
+    }
+
     // The file tools canonicalize the path before the policy check and open
     // that canonical path. So file_read opens project/notes.txt, the path
     // that the policy checked, and not the external file.

@@ -511,16 +511,10 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
                 return true;
         }
 
-        // Element text is not expanded. Expansion or glob text before a ".."
-        // hides the segment that the ".." leaves, so it cannot be verified.
         foreach (var element in occurrence.Clause.Elements)
         {
-            if (checkedElements.Contains(element))
-                continue;
-
-            var text = PathUtility.ExpandHome(element.Value);
-            if (HasUnexpandedTextBeforeParentSegment(text)
-                || HasParentSegmentAfterLink(text, workingDirectory))
+            if (!checkedElements.Contains(element)
+                && HasParentSegmentAfterLink(element, workingDirectory))
             {
                 return true;
             }
@@ -529,13 +523,34 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
         return false;
     }
 
-    private static bool HasUnexpandedTextBeforeParentSegment(string text)
+    /// <summary>
+    /// Checks the decoded text of an element without a bounded value. Text
+    /// that the shell can still expand before a ".." hides the segment that
+    /// the ".." leaves, so that text cannot be verified.
+    /// </summary>
+    /// <remarks>
+    /// The parser classifies quoting for argument and redirect words. A
+    /// <see cref="ArgKind.Literal"/> word holds no glob, variable, or tilde
+    /// expansion, so those characters are plain path text. The parser does
+    /// not model brace expansion in these words, and it does not classify
+    /// verb words. So "{" and all expansion text in a verb stay unverifiable.
+    /// </remarks>
+    private static bool HasParentSegmentAfterLink(ClauseElement element, string? workingDirectory)
+    {
+        var literal = element.Role != ClauseElementRole.Verb && element.Kind == ArgKind.Literal;
+        var text = literal ? element.Value : PathUtility.ExpandHome(element.Value);
+        return HasUnexpandedTextBeforeParentSegment(text, literal)
+               || HasParentSegmentAfterLink(text, workingDirectory);
+    }
+
+    private static bool HasUnexpandedTextBeforeParentSegment(string text, bool literal)
     {
         var segments = OperatingSystem.IsWindows() ? text.Split('/', '\\') : text.Split('/');
         var lastParent = Array.LastIndexOf(segments, "..");
         return lastParent > 0
-               && segments[..lastParent].Any(static segment =>
-                   segment.StartsWith('~') || segment.AsSpan().IndexOfAny("$`*?[{") >= 0);
+               && segments[..lastParent].Any(segment => literal
+                   ? segment.Contains('{', StringComparison.Ordinal)
+                   : segment.StartsWith('~') || segment.AsSpan().IndexOfAny("$`*?[{") >= 0);
     }
 
     // The @file and provider-qualified forms name the path after the prefix.
