@@ -43,7 +43,7 @@ public sealed class ContentVerificationTests : IAsyncLifetime
     {
         var dir = TestSessionTempDirectory.Create();
         _tempDirs.Add(dir);
-        var path = Path.Combine(dir.Path, Guid.NewGuid().ToString("N") + extension);
+        var path = Path.Join(dir.Path, Guid.NewGuid().ToString("N") + extension);
         File.WriteAllBytes(path, bytes);
         return path;
     }

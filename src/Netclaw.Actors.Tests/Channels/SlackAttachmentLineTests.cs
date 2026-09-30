@@ -68,7 +68,7 @@ public sealed class SlackAttachmentLineTests
     {
         await using var tempDir = TestSessionTempDirectory.Create();
         var sessionDir = tempDir.Path;
-        var inboxDir = Path.Combine(sessionDir, SessionDirectoryHelper.InboxSubdirectory);
+        var inboxDir = Path.Join(sessionDir, SessionDirectoryHelper.InboxSubdirectory);
         Directory.CreateDirectory(inboxDir);
 
         await InboxWriter.SanitizeReserveAndWriteAsync(
@@ -87,7 +87,7 @@ public sealed class SlackAttachmentLineTests
 
         Assert.EndsWith("image_1.png", renamedPath, StringComparison.Ordinal);
         Assert.Contains("path=\"inbox/image_1.png\"", projection.Line, StringComparison.Ordinal);
-        Assert.True(File.Exists(Path.Combine(sessionDir, "inbox", "image_1.png")));
+        Assert.True(File.Exists(Path.Join(sessionDir, "inbox", "image_1.png")));
         Assert.NotNull(projection.InlineContent);
     }
 
@@ -96,9 +96,9 @@ public sealed class SlackAttachmentLineTests
     {
         await using var tempDir = TestSessionTempDirectory.Create();
         var sessionDir = tempDir.Path;
-        var inboxDir = Path.Combine(sessionDir, SessionDirectoryHelper.InboxSubdirectory);
+        var inboxDir = Path.Join(sessionDir, SessionDirectoryHelper.InboxSubdirectory);
         Directory.CreateDirectory(inboxDir);
-        var stagedPath = Path.Combine(sessionDir, "stage.tmp");
+        var stagedPath = Path.Join(sessionDir, "stage.tmp");
         await File.WriteAllBytesAsync(stagedPath, [1, 2, 3], TestContext.Current.CancellationToken);
 
         var historicalPath = HistoricalAttachmentInbox.PromoteOrReuse(
@@ -115,6 +115,6 @@ public sealed class SlackAttachmentLineTests
         var finalName = Path.GetFileName(historicalPath);
         Assert.Matches("^image_hist_[0-9a-f]{16}\\.png$", finalName);
         Assert.Contains($"path=\"inbox/{finalName}\"", projection.Line, StringComparison.Ordinal);
-        Assert.True(File.Exists(Path.Combine(sessionDir, "inbox", finalName)));
+        Assert.True(File.Exists(Path.Join(sessionDir, "inbox", finalName)));
     }
 }

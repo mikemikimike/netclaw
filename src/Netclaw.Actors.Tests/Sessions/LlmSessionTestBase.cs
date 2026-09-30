@@ -28,6 +28,9 @@ public abstract class LlmSessionTestBase : TestKit
 
     protected LlmSessionTestBase(ITestOutputHelper output) : base(output: output) { }
 
+    protected NetclawPaths TestPaths => _testTempDir?.Paths
+        ?? throw new InvalidOperationException("Test paths are not initialized.");
+
     /// <summary>
     /// Derived classes that want serialize-messages verification on top of the
     /// shared session pipeline override this to true. Default off because some

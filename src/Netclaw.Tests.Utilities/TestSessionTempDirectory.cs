@@ -40,7 +40,7 @@ public sealed class TestSessionTempDirectory : IAsyncDisposable
     {
         ValidatePrefix(prefix);
 
-        var basePath = System.IO.Path.Combine(
+        var basePath = System.IO.Path.Join(
             System.IO.Path.GetTempPath(),
             $"{prefix}{Guid.NewGuid():N}");
 

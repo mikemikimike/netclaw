@@ -46,7 +46,7 @@ public sealed class HistoricalAttachmentIngressTests : IAsyncLifetime
     {
         var tempDir = TestSessionTempDirectory.Create();
         _tempDirs.Add(tempDir);
-        var path = Path.Combine(tempDir.Path, Guid.NewGuid().ToString("N") + extension);
+        var path = Path.Join(tempDir.Path, Guid.NewGuid().ToString("N") + extension);
         File.WriteAllBytes(path, bytes);
         return path;
     }
