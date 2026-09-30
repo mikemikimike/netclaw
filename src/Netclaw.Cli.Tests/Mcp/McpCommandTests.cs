@@ -584,7 +584,7 @@ public sealed class McpCommandTests : IDisposable
             _ => new HttpResponseMessage(HttpStatusCode.NotFound)
         });
 
-        var listOutput = new StringWriter();
+        using var listOutput = new StringWriter();
         var exitCode = await McpCommand.RunAsync(["mcp", "list"], _paths, daemonApi, listOutput);
         var output = listOutput.ToString();
 
