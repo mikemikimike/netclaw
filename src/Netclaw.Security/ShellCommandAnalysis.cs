@@ -17,11 +17,26 @@ internal sealed class ShellCommandAnalyzer
 {
     private const int MaxWrapperDepth = 8;
     private readonly ShellExecutionEnvironment _environment;
+    private readonly BashInitialStateMode? _screenState;
 
     public ShellCommandAnalyzer(ShellExecutionEnvironment environment)
+        : this(environment, screenState: null)
+    {
+    }
+
+    private ShellCommandAnalyzer(
+        ShellExecutionEnvironment environment,
+        BashInitialStateMode? screenState)
     {
         _environment = environment ?? throw new ArgumentNullException(nameof(environment));
+        _screenState = screenState;
     }
+
+    private static readonly BashInitialStateMode[] ScreenStates =
+    [
+        BashInitialStateMode.IsolatedNonInteractive,
+        BashInitialStateMode.FreshNonInteractiveNoStartup
+    ];
 
     public ShellCommandAnalysis Analyze(string command, string? workingDirectory = null)
     {
@@ -46,7 +61,38 @@ internal sealed class ShellCommandAnalyzer
             denyOnlyClauses,
             failure,
             knownRegionArguments,
-            syntaxProofComplete);
+            syntaxProofComplete)
+        {
+            ScreenClauses = _screenState is null
+                            && _environment.Grammar == ShellGrammar.Bash
+                            && (failure != ShellAnalysisFailure.None || commands.Count == 0)
+                ? CollectScreenClauses(command, workingDirectory)
+                : []
+        };
+    }
+
+    /// <summary>
+    /// Parses unresolved Bash source again for hard deny only, with an
+    /// assumed bounded initial state. The clauses never become approval
+    /// candidates.
+    /// </summary>
+    /// <remarks>
+    /// SECURITY: with an unknown initial state, the parser rejects an
+    /// assignment word, for example <c>X=1 netclaw daemon stop</c>. The
+    /// legacy text scan does not skip that word, so the denied command needs
+    /// this screen. Source that the screen cannot parse adds no clause.
+    /// </remarks>
+    private List<Clause> CollectScreenClauses(string command, string? workingDirectory)
+    {
+        foreach (var state in ScreenStates)
+        {
+            var screened = new ShellCommandAnalyzer(_environment, state)
+                .Analyze(command, workingDirectory);
+            if (screened.Commands.Count > 0)
+                return screened.Commands.Select(static occurrence => occurrence.Clause).ToList();
+        }
+
+        return [];
     }
 
     private ShellAnalysisFailure Analyze(
@@ -70,10 +116,12 @@ internal sealed class ShellCommandAnalyzer
         ParsedCommand parsed;
         try
         {
-            parsed = _environment.ParseForApproval(
-                command,
-                workingDirectory,
-                publishAuthoredSourceFacts: depth == 0);
+            parsed = _screenState is { } state
+                ? _environment.ParseForProhibitionScreen(command, workingDirectory, state)
+                : _environment.ParseForApproval(
+                    command,
+                    workingDirectory,
+                    publishAuthoredSourceFacts: depth == 0);
         }
         catch
         {
@@ -437,6 +485,12 @@ public sealed record ShellCommandAnalysis
     public IReadOnlyList<CommandOccurrence> Commands { get; }
 
     internal IReadOnlyList<Clause> DenyOnlyClauses { get; }
+
+    /// <summary>
+    /// The clauses of the hard-deny screen for unresolved Bash source. They
+    /// never become approval candidates.
+    /// </summary>
+    internal IReadOnlyList<Clause> ScreenClauses { get; init; } = [];
 
     public bool IsResolved => Failure == ShellAnalysisFailure.None && Commands.Count > 0;
 

@@ -161,6 +161,24 @@ read -r unresolved_start unresolved_end unresolved_start_line unresolved_start_c
 )
 security_patterns+=("ShellCommandPolicy.cs{$unresolved_start..$unresolved_end}")
 
+read -r screen_start screen_end screen_start_line screen_start_column screen_end_line screen_end_column < <(
+  find_span \
+    "$analysis_file" \
+    "private List<Clause> CollectScreenClauses" \
+    "foreach (var state in ScreenStates)" \
+    "return [];"
+)
+security_patterns+=("ShellCommandAnalysis.cs{$screen_start..$screen_end}")
+
+read -r screen_deny_start screen_deny_end screen_deny_start_line screen_deny_start_column screen_deny_end_line screen_deny_end_column < <(
+  find_span \
+    "$policy_file" \
+    "foreach (var clause in analysis.ScreenClauses)" \
+    "foreach (var clause in analysis.ScreenClauses)" \
+    "return decision;"
+)
+security_patterns+=("ShellCommandPolicy.cs{$screen_deny_start..$screen_deny_end}")
+
 environment_file="$repo_root/src/Netclaw.Security/ShellExecutionEnvironment.cs"
 read -r mode_start mode_end mode_start_line mode_start_column mode_end_line mode_end_column < <(
   find_span \
@@ -213,12 +231,14 @@ security_patterns+=("ShellExecutionEnvironment.cs{$sanitizer_start..$sanitizer_e
 security_output="$output_path/security"
 run_group "stryker-shell-command-analysis.json" "$security_output" "${security_patterns[@]}"
 security_report="$security_output/reports/mutation-report.json"
-assert_report "$security_report" 51
+assert_report "$security_report" 54
 assert_target "$security_report" "digest-match" "$matching_file" "$matching_start_line" "$matching_start_column" "$matching_end_line" "$matching_end_column" 2
 assert_target "$security_report" "assignment-span" "$analysis_file" "$span_start_line" "$span_start_column" "$span_end_line" "$span_end_column" 1
 assert_target "$security_report" "fallback-wrapper-assignments" "$analysis_file" "$wrapper_start_line" "$wrapper_start_column" "$wrapper_end_line" "$wrapper_end_column" 4
 assert_target "$security_report" "wrapper-child-source" "$analysis_file" "$source_start_line" "$source_start_column" "$source_end_line" "$source_end_column" 9
 assert_target "$security_report" "unresolved-child-hard-deny" "$policy_file" "$unresolved_start_line" "$unresolved_start_column" "$unresolved_end_line" "$unresolved_end_column" 1
+assert_target "$security_report" "hard-deny-screen" "$analysis_file" "$screen_start_line" "$screen_start_column" "$screen_end_line" "$screen_end_column" 2
+assert_target "$security_report" "hard-deny-screen-policy" "$policy_file" "$screen_deny_start_line" "$screen_deny_start_column" "$screen_deny_end_line" "$screen_deny_end_column" 1
 assert_target "$security_report" "bash-initial-state" "$environment_file" "$mode_start_line" "$mode_start_column" "$mode_end_line" "$mode_end_column" 7
 assert_target "$security_report" "bash-sanitizer" "$environment_file" "$sanitizer_start_line" "$sanitizer_start_column" "$sanitizer_end_line" "$sanitizer_end_column" 27
 

@@ -211,6 +211,13 @@ public sealed class ShellCommandPolicy
                 return decision;
         }
 
+        foreach (var clause in analysis.ScreenClauses)
+        {
+            var decision = EvaluateClause(clause);
+            if (!decision.Allowed)
+                return decision;
+        }
+
         return ShellCommandDecision.Allow();
     }
 

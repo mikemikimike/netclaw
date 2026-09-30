@@ -179,6 +179,20 @@ public sealed class ShellAssignmentMutationTests
         Assert.False(policy.Evaluate(
             "bash -lc \"echo \\\"a b\\\"; X=1 netclaw daemon stop\"",
             "/work").Allowed);
+
+        // With an unknown initial state, the approval parser rejects the
+        // assignment word. Only the hard-deny screen sees the denied command.
+        var unknownState = new ShellCommandPolicy(
+            ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux));
+        Assert.False(unknownState.Evaluate(
+            "bash -lc \"echo \\\"a b\\\"; X=1 netclaw daemon stop\"",
+            "/work").Allowed);
+        Assert.False(unknownState.Evaluate(
+            "X=1 netclaw daemon stop",
+            "/work").Allowed);
+        Assert.True(unknownState.Evaluate(
+            "X=1 inspect item",
+            "/work").Allowed);
     }
 
     [Fact]

@@ -70,16 +70,26 @@ public sealed class ShellWrapperChildSourceTests(ShellApprovalMatrixFixture fixt
         Assert.Equal(SelfDestructive, unattended.DenyReason);
     }
 
-    // Bash 5.2 parses the assignment prefix in the wrapped child, but an
-    // assignment inside a wrapper keeps the analysis unresolved. The hard-deny
-    // list must still check the decoded child commands.
-    [Fact]
-    public async Task Unresolved_wrapper_child_after_an_escaped_quote_is_still_hard_denied()
+    // An assignment prefix keeps the analysis unresolved. With an unknown
+    // Bash initial state the approval parser rejects the assignment word, and
+    // Bash 5.2 rejects an assignment inside a wrapper. In both hosts the
+    // denied command must still meet the hard-deny list, because a hard
+    // denial must hold even when an operator would approve the call.
+    [Theory]
+    [InlineData("bash -lc \"echo \\\"a b\\\"; X=1 netclaw daemon stop\"", false)]
+    [InlineData("bash -lc \"echo \\\"a b\\\"; X=1 netclaw daemon stop\"", true)]
+    [InlineData("bash -lc 'echo '\\''a b'\\''; X=1 netclaw daemon stop'", false)]
+    [InlineData("bash -lc 'echo '\\''a b'\\''; X=1 netclaw daemon stop'", true)]
+    [InlineData("bash -lc \"X=1 netclaw daemon stop\"", false)]
+    [InlineData("bash -lc \"X=1 netclaw daemon stop\"", true)]
+    [InlineData("X=1 netclaw daemon stop", false)]
+    [InlineData("X=1 netclaw daemon stop", true)]
+    public async Task Assignment_prefix_cannot_hide_a_denied_command(string command, bool bash52)
     {
-        const string command = "bash -lc \"echo \\\"a b\\\"; X=1 netclaw daemon stop\"";
+        var host = bash52 ? ShellApprovalHost.Bash52 : ShellApprovalHost.Bash;
 
-        var interactive = await EvaluateAsync(command, interactive: true, ShellApprovalHost.Bash52);
-        var unattended = await EvaluateAsync(command, interactive: false, ShellApprovalHost.Bash52);
+        var interactive = await EvaluateAsync(command, interactive: true, host);
+        var unattended = await EvaluateAsync(command, interactive: false, host);
 
         Assert.Equal(ApprovalOutcome.Denied, interactive.Outcome);
         Assert.Equal(SelfDestructive, interactive.DenyReason);

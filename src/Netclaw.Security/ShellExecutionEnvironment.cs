@@ -230,6 +230,20 @@ public sealed class ShellExecutionEnvironment
         };
     }
 
+    /// <summary>
+    /// Parses Bash source for the hard-deny screen with an assumed bounded
+    /// initial state. Approval never uses this result.
+    /// </summary>
+    internal ParsedCommand ParseForProhibitionScreen(
+        string source,
+        string? workingDirectory,
+        BashInitialStateMode assumedState)
+        => new BashParser(new BashParserOptions
+        {
+            WorkingDirectory = workingDirectory,
+            InitialStateMode = assumedState
+        }).Parse(source);
+
     internal bool TryProjectFiniteBashScopes(
         string source,
         string? workingDirectory,
