@@ -17,11 +17,26 @@ internal sealed class ShellCommandAnalyzer
 {
     private const int MaxWrapperDepth = 8;
     private readonly ShellExecutionEnvironment _environment;
+    private readonly BashInitialStateMode? _screenState;
 
     public ShellCommandAnalyzer(ShellExecutionEnvironment environment)
+        : this(environment, screenState: null)
+    {
+    }
+
+    private ShellCommandAnalyzer(
+        ShellExecutionEnvironment environment,
+        BashInitialStateMode? screenState)
     {
         _environment = environment ?? throw new ArgumentNullException(nameof(environment));
+        _screenState = screenState;
     }
+
+    private static readonly BashInitialStateMode[] ScreenStates =
+    [
+        BashInitialStateMode.IsolatedNonInteractive,
+        BashInitialStateMode.FreshNonInteractiveNoStartup
+    ];
 
     public ShellCommandAnalysis Analyze(string command, string? workingDirectory = null)
     {
@@ -46,7 +61,51 @@ internal sealed class ShellCommandAnalyzer
             denyOnlyClauses,
             failure,
             knownRegionArguments,
-            syntaxProofComplete);
+            syntaxProofComplete)
+        {
+            ScreenClauses = _screenState is null
+                            && _environment.Grammar == ShellGrammar.Bash
+                            && (failure != ShellAnalysisFailure.None || commands.Count == 0)
+                ? CollectScreenClauses(command, workingDirectory)
+                : []
+        };
+    }
+
+    /// <summary>
+    /// Parses unresolved Bash source again for hard deny only. The screen first
+    /// parses the whole source, then each list element alone, with an assumed
+    /// bounded initial state. The clauses never become approval candidates.
+    /// </summary>
+    /// <remarks>
+    /// ShellSyntaxTree 0.4.0-beta.5 rejects a background list, so each element
+    /// of <c>echo ok &amp; sudo ls</c> meets hard deny only through this screen.
+    /// A list element that is still unparseable adds no clause.
+    /// </remarks>
+    private List<Clause> CollectScreenClauses(string command, string? workingDirectory)
+    {
+        var clauses = new List<Clause>();
+        if (TryCollectScreenClauses(command, workingDirectory, clauses))
+            return clauses;
+
+        foreach (var element in SplitListElements(command))
+            TryCollectScreenClauses(element, workingDirectory, clauses);
+
+        return clauses;
+    }
+
+    private bool TryCollectScreenClauses(string source, string? workingDirectory, List<Clause> clauses)
+    {
+        foreach (var state in ScreenStates)
+        {
+            var screened = new ShellCommandAnalyzer(_environment, state).Analyze(source, workingDirectory);
+            if (screened.Commands.Count == 0)
+                continue;
+
+            clauses.AddRange(screened.Commands.Select(static occurrence => occurrence.Clause));
+            return true;
+        }
+
+        return false;
     }
 
     private ShellAnalysisFailure Analyze(
@@ -64,16 +123,19 @@ internal sealed class ShellCommandAnalyzer
         // Stable v0.3 excludes background lists. Keep this guard until the
         // parser exposes their concurrency and shell-state boundaries.
         if (_environment.Grammar == ShellGrammar.Bash
-            && ContainsBackgroundListOperator(command))
+            && _screenState is null
+            && FindListOperators(command).Any(static list => list.IsBackground))
             return ShellAnalysisFailure.Unresolved;
 
         ParsedCommand parsed;
         try
         {
-            parsed = _environment.ParseForApproval(
-                command,
-                workingDirectory,
-                publishAuthoredSourceFacts: depth == 0);
+            parsed = _screenState is { } state
+                ? _environment.ParseForProhibitionScreen(command, workingDirectory, state)
+                : _environment.ParseForApproval(
+                    command,
+                    workingDirectory,
+                    publishAuthoredSourceFacts: depth == 0);
         }
         catch
         {
@@ -322,8 +384,27 @@ internal sealed class ShellCommandAnalyzer
         => ShellVerbPolicyData.PosixShellInvokers.Contains(
             LegacyShellTextScan.TrimShellPunctuation(token));
 
-    private static bool ContainsBackgroundListOperator(string command)
+    /// <summary>
+    /// Splits Bash source at each unquoted list operator: <c>;</c>, <c>&amp;&amp;</c>,
+    /// <c>||</c>, and a background <c>&amp;</c>. Only the hard-deny screen uses the elements.
+    /// </summary>
+    private static List<string> SplitListElements(string command)
     {
+        var elements = new List<string>();
+        var start = 0;
+        foreach (var list in FindListOperators(command))
+        {
+            elements.Add(command[start..list.Index]);
+            start = list.Index + list.Length;
+        }
+
+        elements.Add(command[start..]);
+        return elements;
+    }
+
+    private static List<(int Index, int Length, bool IsBackground)> FindListOperators(string command)
+    {
+        var operators = new List<(int Index, int Length, bool IsBackground)>();
         char? quote = null;
         var escaped = false;
 
@@ -352,18 +433,27 @@ internal sealed class ShellCommandAnalyzer
                 continue;
             }
 
-            if (quote is not null || ch != '&')
+            if (quote is not null)
                 continue;
 
             var previous = i > 0 ? command[i - 1] : '\0';
             var next = i + 1 < command.Length ? command[i + 1] : '\0';
-            if (previous is '&' or '>' || next is '&' or '>')
-                continue;
-
-            return true;
+            if (ch == ';')
+            {
+                operators.Add((i, 1, false));
+            }
+            else if (ch is '&' or '|' && next == ch)
+            {
+                operators.Add((i, 2, false));
+                i++;
+            }
+            else if (ch == '&' && previous is not ('&' or '>') && next != '>')
+            {
+                operators.Add((i, 1, true));
+            }
         }
 
-        return false;
+        return operators;
     }
 }
 
@@ -437,6 +527,12 @@ public sealed record ShellCommandAnalysis
     public IReadOnlyList<CommandOccurrence> Commands { get; }
 
     internal IReadOnlyList<Clause> DenyOnlyClauses { get; }
+
+    /// <summary>
+    /// The clauses of the hard-deny screen for unresolved Bash source. They
+    /// never become approval candidates.
+    /// </summary>
+    internal IReadOnlyList<Clause> ScreenClauses { get; init; } = [];
 
     public bool IsResolved => Failure == ShellAnalysisFailure.None && Commands.Count > 0;
 

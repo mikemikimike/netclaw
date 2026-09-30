@@ -251,6 +251,13 @@ public sealed class HardDenyParityCorpusTests(ShellApprovalMatrixFixture fixture
         Control("boundary-configured-pattern-prefix-control", BoundaryTests, "terraform destroyer", BashOverrides),
         Control("boundary-configured-pattern-data-control", BoundaryTests, "echo terraform destroy", BashOverrides),
 
+        // Owner decision (2026-09-30): input that the parser cannot read keeps the
+        // raw-text denial of the base, also where the shell cannot run the text as written.
+        Deny("kept-bash-powershell-remove", "Deferred decision", @"Remove-Item C:\ -Recurse -Confirm:$false", SystemDestructive),
+        Pwsh("kept-pwsh-leading-separator", "Deferred decision", "; Stop-Process -Name netclaw", Expectation.Denied, SelfDestructive),
+        Pwsh("kept-pwsh-quoted-head-background", "Deferred decision", "'netclaw' daemon stop &", Expectation.Denied, SelfDestructive),
+        Pwsh("kept-pwsh51-chain-operator", "Deferred decision", "file_read && rm -rf /", Expectation.Denied, SystemDestructive, host: ShellApprovalHost.WindowsPowerShell51),
+
         // PR 1b: unresolved input still meets hard deny and protected paths.
         Deny("boundary-background-daemon", BoundaryTests, "netclaw daemon stop &", SelfDestructive),
         Deny("boundary-background-quoted-head", BoundaryTests, "'netclaw' daemon stop &", SelfDestructive),
@@ -300,6 +307,23 @@ public sealed class HardDenyParityCorpusTests(ShellApprovalMatrixFixture fixture
 
         await AssertRowAsync(row);
     }
+
+    // Owner decision (2026-09-30): each element of a Bash background list
+    // meets the hard-deny list. The base scan checked only the first command.
+    [SlopwatchSuppress("SW001", "The Bash background cases require a POSIX host.")]
+    [Theory(SkipUnless = nameof(IsPosix), Skip = "The Bash background cases require a POSIX host.")]
+    [InlineData("echo ok & sudo ls", PrivilegeEscalation)]
+    [InlineData("ls & netclaw daemon stop", SelfDestructive)]
+    [InlineData("& 'netclaw' daemon stop", SelfDestructive)]
+    [InlineData("& 'netclaw' daemon stop; $item++", SelfDestructive)]
+    public Task Every_background_list_element_meets_hard_deny(string command, string reason)
+        => AssertRowAsync(new CorpusRow(
+            $"background-element-{command.Length}",
+            "Owner decision",
+            ShellApprovalHost.Bash,
+            command,
+            Expectation.Denied,
+            reason));
 
     private async Task AssertRowAsync(CorpusRow row)
     {

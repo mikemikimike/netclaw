@@ -195,7 +195,16 @@ public sealed class ShellCommandPolicy
             return denyOnlyDecision;
 
         if (analysis.Failure == ShellAnalysisFailure.Unresolved || analysis.Commands.Count == 0)
-            return EvaluateLegacySegments(analysis.Source);
+        {
+            // The raw-text scan decides first, so every denial of the legacy
+            // scan keeps its reason. The parser screen then checks each Bash
+            // list element, which the scan does not split.
+            var legacyDecision = EvaluateLegacySegments(analysis.Source);
+            if (!legacyDecision.Allowed)
+                return legacyDecision;
+
+            return EvaluateClauses(analysis.ScreenClauses);
+        }
 
         foreach (var occurrence in analysis.Commands)
         {
@@ -213,6 +222,18 @@ public sealed class ShellCommandPolicy
         foreach (var clause in clauses)
         {
             var decision = EvaluateDenyOnlyClause(clause);
+            if (!decision.Allowed)
+                return decision;
+        }
+
+        return ShellCommandDecision.Allow();
+    }
+
+    private ShellCommandDecision EvaluateClauses(IReadOnlyList<ShellSyntaxTree.Clause> clauses)
+    {
+        foreach (var clause in clauses)
+        {
+            var decision = EvaluateClause(clause);
             if (!decision.Allowed)
                 return decision;
         }
