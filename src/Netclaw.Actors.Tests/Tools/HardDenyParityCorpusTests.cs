@@ -85,7 +85,18 @@ public sealed class HardDenyParityCorpusTests(ShellApprovalMatrixFixture fixture
         Expectation Expected,
         string? Reason = null,
         ShellApprovalHarnessPolicy? Policy = null,
-        TrustAudience Audience = TrustAudience.Personal);
+        TrustAudience Audience = TrustAudience.Personal)
+    {
+        /// <summary>
+        /// The denial reason on a Windows host, when the base result depends on the host.
+        /// </summary>
+        public string? WindowsHostDenyReason { get; init; }
+    }
+
+    // On a Windows host, a drive root in PowerShell text (C:\, or / as the current
+    // drive root) is a protected-path hit in ToolPathPolicy and FileSystemAuthority.
+    // The base gives the same result there. The hard-deny list does not apply.
+    private const string WindowsDriveRootReason = ProtectedPath;
 
     private static CorpusRow Deny(string id, string source, string command, string reason, ShellApprovalHarnessPolicy? policy = null)
         => new(id, source, ShellApprovalHost.Bash, command, Expectation.Denied, reason, policy);
@@ -180,8 +191,8 @@ public sealed class HardDenyParityCorpusTests(ShellApprovalMatrixFixture fixture
         Pwsh("policy-pwsh-inline-path", PolicyTests, @"Remove-Item -Path:C:\ -Recurse", Expectation.Denied, SystemDestructive),
         Pwsh("policy-pwsh-ri", PolicyTests, @"ri C:\ -Recurse", Expectation.Denied, SystemDestructive),
         Pwsh("policy-pwsh-verbose-control", PolicyTests, "Start-Process pwsh -Verbose RunAs", Expectation.NotDenied),
-        Pwsh("policy-pwsh-force-control", PolicyTests, @"Remove-Item C:\ -Force", Expectation.NotDenied),
-        Pwsh("policy-pwsh-false-control", PolicyTests, @"Remove-Item C:\ -Recurse:$false -Force", Expectation.NotDenied),
+        Pwsh("policy-pwsh-force-control", PolicyTests, @"Remove-Item C:\ -Force", Expectation.NotDenied) with { WindowsHostDenyReason = WindowsDriveRootReason },
+        Pwsh("policy-pwsh-false-control", PolicyTests, @"Remove-Item C:\ -Recurse:$false -Force", Expectation.NotDenied) with { WindowsHostDenyReason = WindowsDriveRootReason },
 
         // ShellCommandDenyOnlyPolicyTests, as whole commands.
         Pwsh("deny-only-daemon", DenyOnlyTests, "netclaw daemon stop", Expectation.Denied, SelfDestructive),
@@ -200,7 +211,7 @@ public sealed class HardDenyParityCorpusTests(ShellApprovalMatrixFixture fixture
         Pwsh("deny-only-custom-order-control", DenyOnlyTests, "custom-tool $operation delete", Expectation.NotDenied, policy: PowerShellOverrides),
         Pwsh("deny-only-custom-spelling-control", DenyOnlyTests, "custom-tool $otherOperation; $item++", Expectation.NotDenied, policy: PowerShellLegacySpelling),
         Pwsh("deny-only-refined-dynamic-control", DenyOnlyTests, "path-tool --delete $path ~", Expectation.NotDenied, policy: PowerShellOverrides),
-        Pwsh("deny-only-dynamic-root-control", DenyOnlyTests, "root-tool $path /", Expectation.NotDenied, policy: PowerShellOverrides),
+        Pwsh("deny-only-dynamic-root-control", DenyOnlyTests, "root-tool $path /", Expectation.NotDenied, policy: PowerShellOverrides) with { WindowsHostDenyReason = WindowsDriveRootReason },
         Pwsh("deny-only-interleaved-control", DenyOnlyTests, "netclaw --verbose daemon stop", Expectation.NotDenied),
         Pwsh("deny-only-single-quoted-data-control", DenyOnlyTests, "Write-Output 'netclaw daemon stop'", Expectation.NotDenied),
         Pwsh("deny-only-double-quoted-data-control", DenyOnlyTests, "Write-Output \"netclaw daemon stop\"", Expectation.NotDenied),
@@ -331,6 +342,15 @@ public sealed class HardDenyParityCorpusTests(ShellApprovalMatrixFixture fixture
         var unattended = await EvaluateAsync(row, interactive: false);
         TestContext.Current.TestOutputHelper?.WriteLine(
             $"corpus | {row.Id} | {row.Host} | interactive={Describe(interactive)} | unattended={Describe(unattended)}");
+
+        if (OperatingSystem.IsWindows() && row.WindowsHostDenyReason is { } windowsReason)
+        {
+            Assert.Equal(ApprovalOutcome.Denied, interactive.Outcome);
+            Assert.Equal(windowsReason, interactive.DenyReason);
+            Assert.Equal(ApprovalOutcome.Denied, unattended.Outcome);
+            Assert.Equal(windowsReason, unattended.DenyReason);
+            return;
+        }
 
         switch (row.Expected)
         {
