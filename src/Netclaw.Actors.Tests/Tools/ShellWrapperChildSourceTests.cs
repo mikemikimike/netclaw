@@ -21,6 +21,8 @@ namespace Netclaw.Actors.Tests.Tools;
 [Collection(ShellApprovalMatrixCollection.Name)]
 public sealed class ShellWrapperChildSourceTests(ShellApprovalMatrixFixture fixture)
 {
+    public static bool IsPosix => !OperatingSystem.IsWindows();
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private const string SelfDestructive = "hard_deny_self_destructive";
@@ -115,13 +117,25 @@ public sealed class ShellWrapperChildSourceTests(ShellApprovalMatrixFixture fixt
         Assert.Equal(ApprovalAllowReason.ApprovalExemptShellCandidates, observed.AllowReason);
     }
 
-    [Fact]
-    public async Task Single_quoted_wrapper_keeps_its_child_candidate()
+    // Reviewed-safe coverage needs POSIX paths for the Bash project
+    // directory, as in the Bash rows of the approval matrix.
+    [SlopwatchSuppress("SW001", "Reviewed-safe Bash coverage requires a POSIX filesystem in addition to the Bash grammar.")]
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "Reviewed-safe Bash coverage requires POSIX filesystem semantics.")]
+    public async Task Single_quoted_wrapper_keeps_its_reviewed_safe_child()
     {
         var observed = await EvaluateAsync("bash -lc 'git status'", interactive: true);
 
         Assert.Equal(ApprovalOutcome.Allowed, observed.Outcome);
         Assert.Equal(ApprovalAllowReason.ReviewedSafePolicy, observed.AllowReason);
+    }
+
+    [Fact]
+    public async Task Single_quoted_wrapper_keeps_its_child_candidate()
+    {
+        var observed = await EvaluateAsync("bash -lc 'git push'", interactive: true);
+
+        Assert.Equal(ApprovalOutcome.RequiresApproval, observed.Outcome);
+        Assert.Equal(["git push"], observed.Prompt!.CandidateVerbs);
     }
 
     [Fact]
