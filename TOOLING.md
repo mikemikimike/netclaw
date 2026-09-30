@@ -287,9 +287,11 @@ the approval units, the candidate verbs, and the bundled-wrapper child source.
 No marker moved, and the counts did not change (72 Security and 9 Actors
 mutants killed; the run took 5 minutes). The raw-text hard-deny scan for
 unresolved input moved to `LegacyShellTextScan` without a change to its
-algorithm. It has no focused target: `HardDenyParityCorpusTests` pins its
-outcomes, and the owner has not yet decided whether a parser-only screen
-replaces it. CI allows 30 minutes for
+algorithm. The owner kept it (2026-09-30), and a parser screen now adds a
+hard-deny check of each Bash list element. Neither has a focused target:
+`HardDenyParityCorpusTests` pins the kept denials and the four stricter
+background-list cases. The gate re-run after the screen killed the same 81
+mutants. CI allows 30 minutes for
 hosted-runner variance and report upload. The report directory is
 `artifacts/stryker/shell-command-analysis`.
 
