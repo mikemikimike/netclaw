@@ -124,15 +124,21 @@ public sealed class ConsentWireCompatibilityTests
         try
         {
             var digest = new ApprovalAssignmentDigest($"sha256:{new string('c', 64)}");
+            // The v3 store keeps the path style of each entry: Bash folders are
+            // POSIX paths and PowerShell folders are Windows paths on every
+            // host. A non-shell folder is an absolute path of the host.
+            var hostDirectory = Path.Combine(root.FullName, "repo");
             ApprovalEntry[] shellEntries =
             [
                 ApprovalEntry.CreateTokenPrefix(ApprovalShell.Bash, ["git", "status"], "/work/repo"),
                 ApprovalEntry.CreateTokenPrefix(ApprovalShell.Bash, ["curl"]),
                 ApprovalEntry.CreateTokenPrefix(ApprovalShell.Bash, ["make", "test"], "/work/repo", assignmentDigest: digest),
+                ApprovalEntry.CreateTokenPrefix(ApprovalShell.PowerShell, ["Get-ChildItem"], @"C:\work\repo"),
+                ApprovalEntry.CreateTokenPrefix(ApprovalShell.PowerShell, ["Invoke-Build"], assignmentDigest: digest),
             ];
             ApprovalEntry[] nonShellEntries =
             [
-                ApprovalEntry.CreateNonShell("file_write", "/work/repo"),
+                ApprovalEntry.CreateNonShell("file_write", hostDirectory),
                 ApprovalEntry.CreateNonShell("notion/notion-create-pages"),
             ];
 
@@ -156,6 +162,8 @@ public sealed class ConsentWireCompatibilityTests
 
             var recordedText = File.ReadAllText(recordedPath);
             Assert.Contains("\"directory\": \"/work/repo\"", recordedText, StringComparison.Ordinal);
+            Assert.Contains("\"directory\": \"C:\\\\work\\\\repo\"", recordedText, StringComparison.Ordinal);
+            Assert.Contains(System.Text.Json.JsonSerializer.Serialize(hostDirectory), recordedText, StringComparison.Ordinal);
             Assert.DoesNotContain("\"repository\"", recordedText, StringComparison.Ordinal);
             Assert.Equal(File.ReadAllBytes(recordedPath), File.ReadAllBytes(rewrittenPath));
         }
