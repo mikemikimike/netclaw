@@ -89,11 +89,11 @@ public sealed class TestSessionTempDirectory : IAsyncDisposable
             }
             catch (IOException) when (i < 7)
             {
-                await Task.Delay(25 * (i + 1));
+                await Task.Delay(25 * (i + 1)); // slopwatch-ignore: SW004 test cleanup retry for locked SQLite files
             }
             catch (UnauthorizedAccessException) when (i < 7)
             {
-                await Task.Delay(25 * (i + 1));
+                await Task.Delay(25 * (i + 1)); // slopwatch-ignore: SW004 test cleanup retry for locked SQLite files
             }
             catch (DirectoryNotFoundException)
             {
