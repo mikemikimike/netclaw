@@ -47,7 +47,7 @@ coverage. They do not replace positive and negative behavior tests.
 | `ShellPolicyEvaluation.CandidateState.ApplyActorEvidence` | Actor evidence cannot replace existing candidate coverage | 1 killed | `./scripts/run-tool-authorization-mutations.sh` |
 | Shell analysis, denial-only, tree effects, and reviewed-safe gates | Parser-proved regions and authored diagnostic syntax preserve hard denials; only bounded audited non-path values and consistent non-link-following tree facts can use reusable approval | 81 killed | `./scripts/run-shell-command-analysis-mutations.sh` |
 | Shell assignment identity, wrapper fallback, syntax reconciliation, host mode, prompt rollback, and Bash sanitation | Reusable grants require exact facts, fallback wrappers must stay one-time, versioned prompts must fail closed, and strong modes require the reviewed launch contract | 56 killed | `./scripts/run-shell-assignment-mutations.sh` |
-| Approval scope and repository persistence | Folder and repository grants require candidate scope, identity, registration, and containment | 12 killed | `./scripts/run-approval-directory-mutations.sh` |
+| Approval scope and repository persistence | Folder and repository grants require candidate scope, identity, registration, and containment; a ".." after a link makes the scope unresolved | 14 killed | `./scripts/run-approval-directory-mutations.sh` |
 | `ReminderManagerActor.HandleExecutionOutcomeAsync` | Only the current attempt can settle; the manager replies after settlement | 2 killed | `./scripts/run-reminder-execution-mutations.sh` |
 | `ActiveExecutionTracker.TryRemove` | Only the current owner can remove its guard; cleanup removes that guard | 2 killed | `./scripts/run-reminder-execution-mutations.sh` |
 | `McpArtifactMaterializer.TryAdmit` | Scanner approval and verified MIME both precede MCP artifact storage | 4 killed | `./scripts/run-mcp-artifact-admission-mutations.sh` |
@@ -131,7 +131,7 @@ Run the approval directory gate:
 ```
 
 The script reuses the xUnit 2 harness.
-It selects six security source regions and three approval actor conditions:
+It selects eight security source regions and three approval actor conditions:
 
 | Decision | Expected mutants |
 |----------|------------------|
@@ -141,19 +141,22 @@ It selects six security source regions and three approval actor conditions:
 | Candidate repository scope and identity | 3 killed: force a result or relax the identity check |
 | Common identity across candidates | 1 killed: remove the logical negation |
 | Reciprocal worktree registration | 1 killed: remove the logical negation |
+| Parent segment after a link, matcher gate | 1 killed: negate the condition |
+| Parent segment after a link, link test | 1 killed: negate the condition |
 | Persistence candidate resolution | 1 killed: remove the logical negation |
 | Persistence common identity | 1 killed: remove the logical negation |
 | Persistence worktree root | 1 killed: remove the logical negation |
 
-The script requires these counts at their exact source locations and 12 tested mutants overall.
+The script requires these counts at their exact source locations and 14 tested mutants overall.
 It fails if a target is absent, survives, exceeds its time limit, or cannot compile.
 The source selector rejects an absent or duplicate boundary before Stryker starts.
 This protects the gate when the authorization code and diagnostic code contain similar conditions.
 
-Seventeen cases exercise the approval matcher and persistence gate with real directories and links.
+Eighteen cases exercise the approval matcher and persistence gate with real directories and links.
 They cover the grant root, normal descendants, sibling prefixes, traversal, relative paths, and candidate scope that differs from cwd.
 The repository cases cover candidate resolution, mixed identities, reciprocal registration, and a nested registered worktree.
 The link cases prove that the link reaches the sibling directory before they require denial.
+The parent-segment case proves that ".." after a link voids the grant and ".." after a real directory keeps it.
 Windows path cases cover case rules, drive boundaries, and traversal on every host.
 The native filesystem cases select Bash on POSIX hosts and PowerShell on Windows.
 The Linux mutation job does not mutate the Windows link branch; the ordinary Windows test job exercises that branch.

@@ -157,6 +157,13 @@ phrase for every uncovered command occurrence. It also omits `Always here`
 when no safe directory scope can be stored. This rule prevents a one-time
 decision from becoming broader reusable authority.
 
+A `..` segment that leaves a symbolic link also gives only `Once` or
+`Deny`. The OS follows the link before it applies `..`. For example,
+if `lnk` points to `/data/deep`, then `cat lnk/../notes.txt` reads
+`/data/notes.txt` and not `./notes.txt`. Folder grants, repository grants, and
+reviewed-safe phrases do not cover such a command. A headless call is denied.
+A `..` that leaves an ordinary directory keeps its normal approval behavior.
+
 ### Repository grants
 
 `This repository` creates a distinct grant for one Git common directory.

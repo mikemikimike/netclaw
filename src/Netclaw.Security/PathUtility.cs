@@ -223,6 +223,72 @@ public static class PathUtility
         return false;
     }
 
+    /// <summary>
+    /// Returns true when a ".." segment in <paramref name="path"/> leaves a
+    /// filesystem link, or when Netclaw cannot verify the segment that it
+    /// leaves. The OS follows a link before it applies "..", so the lexical
+    /// form of such a path does not name the file that the OS opens. A
+    /// relative path resolves against <paramref name="baseDirectory"/>.
+    /// </summary>
+    /// <remarks>
+    /// A path without a ".." segment returns false and causes no I/O. A
+    /// missing segment is not a link, as in <see cref="ContainsSymlinkSegment"/>.
+    /// The caller supplies an expanded path. This method reads each character
+    /// literally.
+    /// </remarks>
+    public static bool HasParentSegmentAfterLink(string path, string? baseDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        char[] separators = OperatingSystem.IsWindows() ? ['/', '\\'] : ['/'];
+        if (!path.Split(separators).Contains(".."))
+            return false;
+
+        try
+        {
+            string fullPath;
+            if (Path.IsPathFullyQualified(path))
+                fullPath = path;
+            else if (!Path.IsPathRooted(path)
+                     && !string.IsNullOrWhiteSpace(baseDirectory)
+                     && Path.IsPathFullyQualified(baseDirectory))
+                fullPath = Path.Join(baseDirectory, path);
+            else
+                return true;
+
+            var root = Path.GetPathRoot(fullPath)!;
+            var current = new List<string>();
+            foreach (var segment in fullPath[root.Length..].Split(separators))
+            {
+                if (segment is "" or ".")
+                    continue;
+
+                if (segment != "..")
+                {
+                    current.Add(segment);
+                    continue;
+                }
+
+                if (current.Count == 0)
+                    continue;
+
+                if (IsReparsePointOrUnreadable(Path.Combine([root, .. current])))
+                    return true;
+
+                current.RemoveAt(current.Count - 1);
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is ArgumentException
+                                   or IOException
+                                   or NotSupportedException
+                                   or UnauthorizedAccessException
+                                   or System.Security.SecurityException)
+        {
+            return true;
+        }
+    }
+
     private static bool IsReparsePointOrUnreadable(string path)
     {
         if (!File.Exists(path) && !Directory.Exists(path))

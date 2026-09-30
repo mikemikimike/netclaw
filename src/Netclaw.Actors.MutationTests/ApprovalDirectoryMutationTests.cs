@@ -8,6 +8,7 @@ using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
 using Netclaw.Security;
 using Netclaw.Tools;
+using ShellSyntaxTree;
 using Xunit;
 
 namespace Netclaw.Actors.MutationTests;
@@ -71,6 +72,39 @@ public sealed class ApprovalDirectoryMutationTests : IDisposable
 
         Assert.False(Matches(candidate, _grantRoot));
         Assert.True(Matches(Path.Combine(_grantRoot, "src"), _grantRoot));
+    }
+
+    // The OS follows the link before it applies "..", so link/../notes.txt
+    // names app-other/notes.txt. Its lexical form stays inside the grant.
+    [Fact]
+    public void Folder_grant_does_not_cover_a_parent_segment_after_a_link()
+    {
+        Directory.CreateSymbolicLink(Path.Combine(_grantRoot, "link"), Path.Combine(_outside, "nested"));
+        var matcher = new ShellApprovalMatcher(OperatingSystem.IsWindows()
+            ? ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7)
+            : ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux));
+        var verb = OperatingSystem.IsWindows() ? "Get-Content" : "cat";
+        var grant = ApprovalEntry.CreateTokenPrefix(_shell, [verb], _grantRoot);
+
+        Assert.True(CommandMatches(Path.Combine(_grantRoot, "src", "..", "notes.txt")));
+        Assert.False(CommandMatches(Path.Combine(_grantRoot, "link", "..", "notes.txt")));
+
+        bool CommandMatches(string path)
+        {
+            var analysis = matcher.AnalyzeInvocation(
+                new ToolName(ShellTool.ToolName),
+                new Dictionary<string, object?>
+                {
+                    ["Command"] = $"{verb} '{path}'",
+                    ["WorkingDirectory"] = _grantRoot,
+                });
+            return !analysis.IsMessy
+                   && analysis.Candidates.Count > 0
+                   && analysis.Candidates.All(candidate =>
+                       ApprovalPatternMatching.MatchesShellApproval(candidate, _grantRoot, [grant]));
+        }
     }
 
     [Theory]
