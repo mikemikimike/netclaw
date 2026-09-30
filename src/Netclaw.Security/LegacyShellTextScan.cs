@@ -8,16 +8,18 @@ using System.Text;
 namespace Netclaw.Security;
 
 /// <summary>
-/// The raw-text scan that feeds hard deny for unresolved input and the
-/// protected-path text heuristic. Approval units also use <see cref="Tokenize"/>
-/// to show one parser word without its quote marks. ShellSyntaxTree supplies
-/// every other shell fact.
+/// Raw-text helpers for shell text. They serve the hard-deny scan of unresolved
+/// input, the protected-path text check of every command, the parse of configured
+/// <c>HardDenyPatterns</c>, quote removal on approval-unit words, and a
+/// punctuation trim. ShellSyntaxTree supplies every other shell fact.
 /// </summary>
 /// <remarks>
-/// This scan stays until the owner decides the deferred hard-deny differential
-/// (authorization PR 4). A parser-only screen changes hard-deny outcomes in both
-/// directions for some unresolved input. This code keeps them identical.
-/// It never creates an approval candidate or a reusable grant.
+/// Owner decision (2026-09-30, authorization PR 4): this class stays as policy for
+/// input that the parser cannot read. The raw-text scan decides first, so every
+/// denial of the earlier releases stays. A parser screen then checks each Bash
+/// list element (the stricter cases were kept; the looser cases were rejected).
+/// None of these helpers can allow a command, create an approval candidate, or
+/// create a reusable grant.
 /// </remarks>
 internal static class LegacyShellTextScan
 {
